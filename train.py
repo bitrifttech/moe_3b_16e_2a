@@ -159,7 +159,11 @@ def seed_all(seed=42):
 
 def load_data(tok, max_len=1024):
     ds = load_dataset("OpenAssistant/oasst1")
-    # Filter and flatten to a Dataset (not DatasetDict)
+    # If ds is a DatasetDict, concatenate all splits
+    if isinstance(ds, dict):
+        from datasets import concatenate_datasets
+        ds = concatenate_datasets([ds[k] for k in ds.keys()])
+    # Now filter
     ds = ds.filter(lambda x: x["lang"] == "en" and x["role"] == "assistant")
     # Now split
     split = ds.train_test_split(test_size=0.05, seed=42)
