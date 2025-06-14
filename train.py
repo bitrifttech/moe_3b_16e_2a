@@ -159,14 +159,14 @@ def seed_all(seed=42):
 
 def load_data(tok, max_len=1024):
     ds = load_dataset("OpenAssistant/oasst1")
+    # Filter and flatten to a Dataset (not DatasetDict)
     ds = ds.filter(lambda x: x["lang"] == "en" and x["role"] == "assistant")
+    # Now split
     split = ds.train_test_split(test_size=0.05, seed=42)
-
     def tok_fn(batch):
         return tok(batch["text"], truncation=True, padding="max_length", max_length=max_len)
-
-    train_ds = split["train"].map(tok_fn, batched=True, remove_columns=ds["train"].column_names)
-    val_ds = split["test"].map(tok_fn, batched=True, remove_columns=ds["train"].column_names)
+    train_ds = split["train"].map(tok_fn, batched=True, remove_columns=split["train"].column_names)
+    val_ds = split["test"].map(tok_fn, batched=True, remove_columns=split["test"].column_names)
     return train_ds, val_ds
 
 def main():
