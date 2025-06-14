@@ -8,7 +8,9 @@ if [ -d "venv" ]; then
 fi
 
 # Create new venv
-python3 -m venv venv
+pyenv install 3.10.14
+pyenv local 3.10.14
+python -m venv venv
 source venv/bin/activate
 
 # Upgrade pip
