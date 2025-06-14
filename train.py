@@ -23,15 +23,34 @@ class ProgressCallback(TrainerCallback):
         self.pbar = None
         self.total_steps = None
         self.current_step = 0
+        self.start_time = None
 
     def on_train_begin(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
+        import time
         self.total_steps = state.max_steps
         self.pbar = tqdm(total=self.total_steps, desc="Training Progress", dynamic_ncols=True)
+        self.start_time = time.time()
         logger.info(f"Training started: {self.total_steps} steps expected.")
 
     def on_step_end(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
+        import time
         self.current_step = state.global_step
         self.pbar.update(1)
+        elapsed = time.time() - self.start_time if self.start_time else 0
+        steps_done = self.current_step
+        steps_left = self.total_steps - steps_done
+        eta = (elapsed / steps_done * steps_left) if steps_done > 0 else 0
+        # Format ETA as H:MM:SS
+        def format_eta(seconds):
+            if seconds <= 0:
+                return "--:--:--"
+            m, s = divmod(int(seconds), 60)
+            h, m = divmod(m, 60)
+            return f"{h:d}:{m:02d}:{s:02d}"
+        eta_str = format_eta(eta)
+        self.pbar.set_postfix({"ETA": eta_str})
+        if steps_done % 100 == 0 or steps_done == self.total_steps:
+            logger.info(f"Step {self.current_step}/{self.total_steps} - ETA: {eta_str}")
         if state.log_history and len(state.log_history) > 0:
             last_log = state.log_history[-1]
             if 'loss' in last_log:
