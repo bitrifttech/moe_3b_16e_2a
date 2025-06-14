@@ -1,24 +1,25 @@
 import torch
 import torch.nn as nn
 from transformers import GPT2Config, GPT2PreTrainedModel, AutoModelForCausalLM
-import tutel
+from tutel import moe as tutel_moe
 
 class MoEBlock(nn.Module):
     """Top‑2 MoE feed‑forward layer using Tutel"""
     def __init__(self, d_model, d_ff, num_experts=16, k=2):
         super().__init__()
-        self.gate = tutel.moe.TopKGate(d_model, num_experts, k=k)
-        self.experts = tutel.moe.MExperts([
-            nn.Sequential(
-                nn.Linear(d_model, d_ff),
-                nn.GELU(),
-                nn.Linear(d_ff, d_model)
-            ) for _ in range(num_experts)
-        ])
+        self.moe = tutel_moe.moe_layer(
+            gate_type={'type': 'top', 'k': k},
+            model_dim=d_model,
+            experts={
+                'num_experts_per_device': num_experts,
+                'type': 'ffn',
+                'hidden_size_per_expert': d_ff,
+                'activation_fn': lambda x: torch.nn.functional.gelu(x)
+            }
+        )
 
     def forward(self, x):
-        y, _ = tutel.moe.moe_layer.apply(self.gate, self.experts, x)
-        return y
+        return self.moe(x)
 
 class GPT2WithMoE(GPT2PreTrainedModel):
     """GPT‑2 backbone where every second MLP is replaced by MoEBlock"""
