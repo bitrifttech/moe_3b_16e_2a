@@ -40,8 +40,10 @@ results = []
 def benchmark_torch(device, dtype, bits, label):
     # 8/4 bit not supported for matmul, skip
     if bits < 16:
+        print(f"[SKIP] {device.upper()} {label}: int{bits} not supported for matmul.")
         results.append((device, f'int{bits}', 'N/A', 'Not supported for matmul'))
         return
+    print(f"[RUN] {device.upper()} {label}: benchmarking {N}x{N} matmul ...", end='', flush=True)
     a = torch.randn((N, N), device=device, dtype=dtype)
     b = torch.randn((N, N), device=device, dtype=dtype)
     # Warmup
@@ -57,30 +59,40 @@ def benchmark_torch(device, dtype, bits, label):
     elapsed = end - start
     ops = 2 * N * N * N * REPEATS
     tflops = ops / elapsed / 1e12
+    print(f" done. {tflops:.2f} TFLOPS")
     results.append((device, label, f'{tflops:.2f}', ''))
 
 def benchmark_cpu():
+    print("\n[CPU] Benchmarking on CPU ...")
     for dtype, bits, label in PRECISIONS:
         benchmark_torch('cpu', dtype, bits, label)
     # 8/4 bit note
+    print("[SKIP] CPU int8: not supported for matmul.")
+    print("[SKIP] CPU int4: not supported for matmul.")
     results.append(('cpu', 'int8', 'N/A', 'Not supported for matmul'))
     results.append(('cpu', 'int4', 'N/A', 'Not supported for matmul'))
 
 def benchmark_cuda():
     if not torch.cuda.is_available():
+        print("\n[CUDA] CUDA not available, skipping.")
         return
+    print("\n[CUDA] Benchmarking on CUDA GPU ...")
     for dtype, bits, label in PRECISIONS:
         try:
             benchmark_torch('cuda', dtype, bits, label)
         except RuntimeError as e:
+            print(f"[ERROR] CUDA {label}: {e}")
             results.append(('cuda', label, 'N/A', f'Error: {e}'))
+    print("[SKIP] CUDA int8: not supported for matmul.")
+    print("[SKIP] CUDA int4: not supported for matmul.")
     results.append(('cuda', 'int8', 'N/A', 'Not supported for matmul'))
     results.append(('cuda', 'int4', 'N/A', 'Not supported for matmul'))
 
 def benchmark_mlx():
     if not HAS_MLX:
+        print("\n[MLX] MLX not installed, skipping.")
         return
-    # MLX supports float64, float32, float16, bfloat16
+    print("\n[MLX] Benchmarking on MLX (Apple Silicon) ...")
     mlx_precisions = [
         (mx.float64, 64, 'float64'),
         (mx.float32, 32, 'float32'),
@@ -88,6 +100,7 @@ def benchmark_mlx():
         (mx.bfloat16, 16, 'bfloat16'),
     ]
     for dtype, bits, label in mlx_precisions:
+        print(f"[RUN] MLX {label}: benchmarking {N}x{N} matmul ...", end='', flush=True)
         a = mx.array(np.random.randn(N, N), dtype=dtype)
         b = mx.array(np.random.randn(N, N), dtype=dtype)
         # Warmup
@@ -102,7 +115,10 @@ def benchmark_mlx():
         elapsed = end - start
         ops = 2 * N * N * N * REPEATS
         tflops = ops / elapsed / 1e12
+        print(f" done. {tflops:.2f} TFLOPS")
         results.append(('mlx', label, f'{tflops:.2f}', ''))
+    print("[SKIP] MLX int8: not supported for matmul.")
+    print("[SKIP] MLX int4: not supported for matmul.")
     results.append(('mlx', 'int8', 'N/A', 'Not supported for matmul'))
     results.append(('mlx', 'int4', 'N/A', 'Not supported for matmul'))
 
@@ -118,6 +134,7 @@ def main():
     benchmark_cpu()
     benchmark_cuda()
     benchmark_mlx()
+    print("\n[REPORT] Benchmarking complete. Results below:\n")
     print(HEADER, end='')
     for backend, precision, tflops, notes in results:
         print(f"| {backend} | {precision} | {tflops} | {notes} |")
