@@ -1,4 +1,4 @@
-import argparse, random, os, torch
+import argparse, random, os, torch, glob
 from datasets import load_dataset
 from transformers import AutoTokenizer, GPT2Config, Trainer, TrainingArguments
 from bitsandbytes.optim import Adam8bit
@@ -115,7 +115,17 @@ def main():
         eval_dataset=val_ds,
         callbacks=[ProgressCallback()]
     )
-    trainer.train()
+
+    # Find latest checkpoint if exists
+    checkpoint_dir = args.output_dir
+    checkpoints = sorted(glob.glob(f"{checkpoint_dir}/checkpoint-*"), key=lambda x: int(x.split('-')[-1]) if x.split('-')[-1].isdigit() else -1)
+    resume_checkpoint = checkpoints[-1] if checkpoints else None
+    if resume_checkpoint:
+        logger.info(f"Resuming training from checkpoint: {resume_checkpoint}")
+    else:
+        logger.info("No checkpoint found. Starting training from scratch.")
+
+    trainer.train(resume_from_checkpoint=resume_checkpoint)
 
 if __name__ == "__main__":
     main()
