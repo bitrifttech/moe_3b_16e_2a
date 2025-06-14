@@ -32,7 +32,7 @@ PRECISIONS = [
 # 8 and 4 bit: PyTorch does not natively support matmul for these, so we skip or note.
 
 # Matrix size for benchmark (large enough for GPU, not too big for CPU)
-N = 4096
+N = 1024
 REPEATS = 10
 
 results = []
@@ -93,12 +93,15 @@ def benchmark_mlx():
         print("\n[MLX] MLX not installed, skipping.")
         return
     print("\n[MLX] Benchmarking on MLX (Apple Silicon) ...")
+    # MLX supports float32, float16, bfloat16 (not float64)
     mlx_precisions = [
-        (mx.float64, 64, 'float64'),
         (mx.float32, 32, 'float32'),
         (mx.float16, 16, 'float16'),
         (mx.bfloat16, 16, 'bfloat16'),
     ]
+    # Skip float64
+    print("[SKIP] MLX float64: not supported on MLX GPU.")
+    results.append(('mlx', 'float64', 'N/A', 'Not supported on MLX GPU'))
     for dtype, bits, label in mlx_precisions:
         print(f"[RUN] MLX {label}: benchmarking {N}x{N} matmul ...", end='', flush=True)
         a = mx.array(np.random.randn(N, N), dtype=dtype)
