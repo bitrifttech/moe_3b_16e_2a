@@ -90,3 +90,19 @@ while True:
 - On macOS ARM, only CPU training/inference is supported (much slower than GPU).
 - Checkpoints and logs are saved in the `outputs/` directory by default.
 - For custom training/evaluation settings, see `train.py` and adjust arguments as needed.
+
+---
+
+## Environment Benchmark: Rate Your Training Hardware
+
+You can benchmark your system's matrix multiplication performance (TFLOPS) for CUDA, MLX (Apple Silicon), and CPU backends across multiple precisions (64, 32, 16, 8, 4 bits) using the provided script:
+
+```bash
+python rate_env.py
+```
+
+- The script will auto-detect available backends (CUDA, MLX, CPU) and run a matrix multiplication benchmark for each supported precision.
+- Results are printed as a Markdown table, showing TFLOPS for each backend/precision and any relevant notes.
+- If a backend is not available, it will be skipped and noted in the report.
+
+This helps you quickly assess the training and inference capabilities of your environment for deep learning workloads.
