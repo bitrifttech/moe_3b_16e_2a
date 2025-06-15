@@ -106,3 +106,31 @@ python rate_env.py
 - If a backend is not available, it will be skipped and noted in the report.
 
 This helps you quickly assess the training and inference capabilities of your environment for deep learning workloads.
+
+---
+
+## Dockerized Environments: CUDA (NVIDIA) & MLX (Apple Silicon)
+
+You can use Docker to set up a reproducible environment for this project on both NVIDIA (CUDA) and Apple Silicon (MLX) hardware.
+
+### CUDA (NVIDIA GPU) Environment
+- **Build:**
+  ```bash
+  docker build -f Dockerfile.cuda -t moe-cuda .
+  ```
+- **Run:**
+  ```bash
+  docker run --gpus all -it -v $(pwd):/workspace moe-cuda
+  ```
+
+### MLX (Apple Silicon, M1/M2/M3) Environment
+- **Build:**
+  ```bash
+  docker build -f Dockerfile.mlx -t moe-mlx .
+  ```
+- **Run:**
+  ```bash
+  docker run -it -v $(pwd):/workspace moe-mlx
+  ```
+
+Both images install all required dependencies. Mount your project directory as a volume for code and data access. If you need Jupyter or other tools, you can extend these Dockerfiles as needed.

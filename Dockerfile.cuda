@@ -1,0 +1,19 @@
+FROM pytorch/pytorch:2.2.2-cuda12.1-cudnn8-runtime
+
+# System deps
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user
+RUN useradd -ms /bin/bash user
+USER user
+WORKDIR /workspace
+
+# Install Python dependencies
+RUN pip install --upgrade pip
+RUN pip install transformers datasets accelerate deepspeed bitsandbytes
+RUN pip install -U --no-build-isolation git+https://github.com/microsoft/tutel@main
+
+# Optionally copy project files (uncomment if building with context)
+# COPY . /workspace
+
+CMD ["bash"] 
