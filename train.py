@@ -9,6 +9,12 @@ from transformers import TrainerCallback, TrainingArguments, TrainerState, Train
 import json
 from datetime import datetime
 
+# Insert a constant MODEL_SCALE (0.8) after the imports so that model size is reduced by 20%
+MODEL_SCALE = 0.8
+
+# Ensure tokenizers parallelism disabled
+os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+
 # Set up logging
 logging.basicConfig(
     level=logging.INFO,
@@ -18,6 +24,13 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
+
+class _SuppressCapacityLogs(logging.Filter):
+    def filter(self, record):
+        msg = record.getMessage()
+        return 'Capacity =' not in msg and 'real-time capacity-factor' not in msg
+
+logging.getLogger().addFilter(_SuppressCapacityLogs())
 logger = logging.getLogger(__name__)
 
 class ProgressCallback(TrainerCallback):
@@ -168,7 +181,9 @@ def load_data(tok, max_len=1024):
     # Now split
     split = ds.train_test_split(test_size=0.05, seed=42)
     def tok_fn(batch):
-        return tok(batch["text"], truncation=True, padding="max_length", max_length=max_len)
+        tok_out = tok(batch["text"], truncation=True, padding="max_length", max_length=max_len)
+        tok_out["labels"] = tok_out["input_ids"].copy()
+        return tok_out
     train_ds = split["train"].map(tok_fn, batched=True, remove_columns=split["train"].column_names)
     val_ds = split["test"].map(tok_fn, batched=True, remove_columns=split["test"].column_names)
     return train_ds, val_ds
@@ -190,10 +205,10 @@ def main():
     cfg = GPT2Config(
         vocab_size=tokenizer.vocab_size,
         n_positions=1024,
-        n_embd=1280,
-        n_layer=24,
-        n_head=20,
-        n_inner=5120,
+        n_embd=int(1280 * MODEL_SCALE),
+        n_layer=int(24 * MODEL_SCALE),
+        n_head=int(20 * MODEL_SCALE),
+        n_inner=int(5120 * MODEL_SCALE),
         pad_token_id=tokenizer.pad_token_id
     )
 

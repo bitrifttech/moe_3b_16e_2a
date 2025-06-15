@@ -3,9 +3,11 @@ import torch.nn as nn
 from transformers import GPT2Config, GPT2PreTrainedModel, AutoModelForCausalLM
 from tutel import moe as tutel_moe
 
+NUM_EXPERTS = 8  # Reduce number of experts per device to lower memory footprint
+
 class MoEBlock(nn.Module):
     """Top‑2 MoE feed‑forward layer using Tutel"""
-    def __init__(self, d_model, d_ff, num_experts=16, k=2):
+    def __init__(self, d_model, d_ff, num_experts=NUM_EXPERTS, k=2):
         super().__init__()
         self.moe = tutel_moe.moe_layer(
             gate_type={'type': 'top', 'k': k},
@@ -34,7 +36,7 @@ class GPT2WithMoE(GPT2PreTrainedModel):
                 block.mlp = MoEBlock(
                     d_model=config.n_embd,
                     d_ff=config.n_inner,
-                    num_experts=16,
+                    num_experts=NUM_EXPERTS,
                     k=2
                 )
         self.post_init()
