@@ -1,6 +1,6 @@
 import argparse, random, os, torch, glob
 from datasets import load_dataset
-from transformers import AutoTokenizer, GPT2Config, Trainer, TrainingArguments
+from transformers import AutoTokenizer, GPT2Config, Trainer, TrainingArguments, DataCollatorForLanguageModeling
 from bitsandbytes.optim import Adam8bit
 import logging
 from tqdm.auto import tqdm
@@ -181,9 +181,7 @@ def load_data(tok, max_len=1024):
     # Now split
     split = ds.train_test_split(test_size=0.05, seed=42)
     def tok_fn(batch):
-        tok_out = tok(batch["text"], truncation=True, padding="max_length", max_length=max_len)
-        tok_out["labels"] = tok_out["input_ids"].copy()
-        return tok_out
+        return tok(batch["text"], truncation=True, padding="max_length", max_length=max_len)
     train_ds = split["train"].map(tok_fn, batched=True, remove_columns=split["train"].column_names)
     val_ds = split["test"].map(tok_fn, batched=True, remove_columns=split["test"].column_names)
     return train_ds, val_ds
@@ -231,13 +229,28 @@ def main():
         learning_rate=5e-5,
         lr_scheduler_type="cosine",
         optim="adamw_bnb_8bit",
-        fp16=True,
+        fp16=False,
         eval_strategy="steps",
-        eval_steps=1000,
-        save_steps=1000,
+        eval_steps=100,
+        save_steps=500,
         logging_steps=100,
         save_total_limit=2,
         deepspeed="./ds_config.json" if args.use_deepspeed else None
+    )
+
+    class FirstCheckpointCallback(TrainerCallback):
+        def __init__(self):
+            self.done = False
+        def on_step_end(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
+            if not self.done and state.global_step >= 1:
+                control.should_save = True
+                self.done = True
+
+    data_collator = DataCollatorForLanguageModeling(
+        tokenizer=tokenizer,
+        mlm=False,
+        pad_to_multiple_of=None,
+        return_tensors="pt",
     )
 
     trainer = Trainer(
@@ -245,7 +258,8 @@ def main():
         args=training_args,
         train_dataset=train_ds,
         eval_dataset=val_ds,
-        callbacks=[ProgressCallback(), CheckpointInfoCallback()]
+        data_collator=data_collator,
+        callbacks=[ProgressCallback(), CheckpointInfoCallback(), FirstCheckpointCallback()]
     )
 
     # Find latest checkpoint if exists
