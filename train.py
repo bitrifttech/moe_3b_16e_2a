@@ -208,7 +208,7 @@ def main():
         lr_scheduler_type="cosine",
         optim="adamw_bnb_8bit",
         fp16=True,
-        evaluation_strategy="steps",
+        eval_strategy="steps",
         eval_steps=1000,
         save_steps=1000,
         logging_steps=100,
