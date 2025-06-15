@@ -8,8 +8,6 @@ if [ -d "venv" ]; then
 fi
 
 # Create new venv
-pyenv install 3.10.14
-pyenv local 3.10.14
 python -m venv venv
 source venv/bin/activate
 
