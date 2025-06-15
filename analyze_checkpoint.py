@@ -50,6 +50,26 @@ def _extract_logits(outputs):
     # HuggingFace models return CausalLMOutputWithCrossAttentions or similar
     return getattr(outputs, "logits", None)
 
+def _greedy_generate(model, tokenizer, input_ids, max_new_tokens: int = 60, device: torch.device = None):
+    """Very small helper that performs greedy decoding when `model.generate` is unavailable."""
+    if hasattr(model, "generate"):
+        try:
+            return model.generate(input_ids=input_ids, max_new_tokens=max_new_tokens, do_sample=False)
+        except AttributeError:
+            pass  # fall through to manual greedy
+
+    if device is None:
+        device = input_ids.device
+    cur_ids = input_ids
+    model.eval()
+    for _ in range(max_new_tokens):
+        with torch.no_grad():
+            outputs = model(cur_ids)
+        logits = _extract_logits(outputs)[:, -1, :]
+        next_id = torch.argmax(logits, dim=-1, keepdim=True)
+        cur_ids = torch.cat([cur_ids, next_id], dim=-1)
+    return cur_ids
+
 # -----------------------------------------------------------------------------
 # Utilities
 # -----------------------------------------------------------------------------
@@ -160,7 +180,7 @@ def summarisation_metrics(model, tokenizer, device: torch.device, samples: int =
         prompt = f"Summarize: {article.strip()}"
         inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=512).to(device)
         with torch.no_grad():
-            out = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
+            out = _greedy_generate(model, tokenizer, inputs.input_ids, max_new_tokens=max_new_tokens)
         summary = tokenizer.decode(out[0], skip_special_tokens=True)
         preds.append(summary)
         refs.append(ref)
