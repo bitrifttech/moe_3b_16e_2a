@@ -2,12 +2,12 @@ import argparse, random, os, torch, glob
 from datasets import load_dataset
 from transformers import AutoTokenizer, GPT2Config, Trainer, TrainingArguments
 from bitsandbytes.optim import Adam8bit
-from moe_model import GPT2WithMoE
 import logging
 from tqdm.auto import tqdm
 from transformers import TrainerCallback, TrainingArguments, TrainerState, TrainerControl
 import json
 from datetime import datetime
+import pathlib
 
 # Insert a constant MODEL_SCALE (0.8) after the imports so that model size is reduced by 20%
 MODEL_SCALE = 0.8
@@ -212,6 +212,15 @@ def main():
         pad_token_id=tokenizer.pad_token_id
     )
 
+    # After initial imports but BEFORE importing moe_model, set LD_LIBRARY_PATH
+    _torch_lib = pathlib.Path(torch.__file__).parent / 'lib'
+    _prev_ld = os.environ.get('LD_LIBRARY_PATH', '')
+    os.environ['LD_LIBRARY_PATH'] = f"{_torch_lib}:{_prev_ld}" if str(_torch_lib) not in _prev_ld else _prev_ld
+    # re-prepend for current process via ctypes util
+    import ctypes, ctypes.util
+    ctypes.CDLL(str(_torch_lib / 'libc10.so'), mode=ctypes.RTLD_GLOBAL)
+
+    from moe_model import GPT2WithMoE
     model = GPT2WithMoE(cfg)
 
     training_args = TrainingArguments(
@@ -245,10 +254,15 @@ def main():
     resume_checkpoint = checkpoints[-1] if checkpoints else None
     if resume_checkpoint:
         logger.info(f"Resuming training from checkpoint: {resume_checkpoint}")
+        try:
+            trainer.train(resume_from_checkpoint=resume_checkpoint)
+            return
+        except ValueError as e:
+            logger.warning(f"Failed to load checkpoint ({e}), starting from scratch.")
     else:
         logger.info("No checkpoint found. Starting training from scratch.")
 
-    trainer.train(resume_from_checkpoint=resume_checkpoint)
+    trainer.train()
 
 if __name__ == "__main__":
     main()
