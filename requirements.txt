@@ -4,4 +4,4 @@ datasets
 accelerate
 deepspeed
 bitsandbytes
-tutel
+mpi4py

@@ -1,7 +1,7 @@
 FROM arm64v8/python:3.10-slim
 
 # System deps
-RUN apt-get update && apt-get install -y git build-essential && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y git build-essential libopenmpi-dev openmpi-bin && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
 RUN useradd -ms /bin/bash user
@@ -10,8 +10,9 @@ WORKDIR /workspace
 
 # Install Python dependencies
 RUN pip install --upgrade pip
-RUN pip install mlx torch transformers datasets accelerate deepspeed
-RUN pip install -U --no-build-isolation git+https://github.com/microsoft/tutel@main
+RUN pip install torch transformers datasets accelerate deepspeed
+COPY requirements.txt .
+RUN pip install -r requirements.txt
 
 # Optionally copy project files (uncomment if building with context)
 # COPY . /workspace
