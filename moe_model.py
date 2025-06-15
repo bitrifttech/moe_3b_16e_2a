@@ -46,6 +46,9 @@ class GPT2WithMoE(GPT2PreTrainedModel):
         logits = self.lm_head(out.last_hidden_state)
         loss = None
         if labels is not None:
-            loss_fn = nn.CrossEntropyLoss()
-            loss = loss_fn(logits.view(-1, logits.size(-1)), labels.view(-1))
+            # Shift so that tokens < n predict n
+            shift_logits = logits[:, :-1, :].contiguous()
+            shift_labels = labels[:, 1:].contiguous()
+            loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
+            loss = loss_fn(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
         return {"loss": loss, "logits": logits}

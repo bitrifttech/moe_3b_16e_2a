@@ -181,9 +181,14 @@ def load_data(tok, max_len=1024):
     # Now split
     split = ds.train_test_split(test_size=0.05, seed=42)
     def tok_fn(batch):
-        return tok(batch["text"], truncation=True, padding="max_length", max_length=max_len)
+        # Tokenise without padding; dynamic padding will be added by the data collator.
+        # This prevents sequences made entirely of pad tokens which caused zero loss.
+        return tok(batch["text"], truncation=True, max_length=max_len)
     train_ds = split["train"].map(tok_fn, batched=True, remove_columns=split["train"].column_names)
     val_ds = split["test"].map(tok_fn, batched=True, remove_columns=split["test"].column_names)
+    # Remove examples that became empty after tokenisation
+    train_ds = train_ds.filter(lambda x: len(x["input_ids"]) > 1)
+    val_ds = val_ds.filter(lambda x: len(x["input_ids"]) > 1)
     return train_ds, val_ds
 
 def main():
@@ -230,10 +235,10 @@ def main():
         lr_scheduler_type="cosine",
         optim="adamw_bnb_8bit",
         fp16=False,
-        eval_strategy="steps",
+        evaluation_strategy="steps",
         eval_steps=100,
         save_steps=500,
-        logging_steps=100,
+        logging_steps=1,
         save_total_limit=2,
         deepspeed="./ds_config.json" if args.use_deepspeed else None
     )
