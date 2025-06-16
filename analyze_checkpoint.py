@@ -297,22 +297,79 @@ def hellaswag_eval(model, tokenizer, device: torch.device, samples: int = 100):
     acc = correct / len(ds)
     return acc
 
-# -----------------------------------------------------------------------------
 # Main
 # -----------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="Analyze checkpoint & run quick tests")
-    parser.add_argument("checkpoint", type=str, help="Path to checkpoint directory")
-    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--samples", type=int, default=100, help="Number of samples for quick metrics")
-    parser.add_argument("--summarise", action="store_true", help="Run CNN/DailyMail summarisation test")
-    parser.add_argument("--truthfulqa", action="store_true", help="Run TruthfulQA multiple-choice test")
-    parser.add_argument("--hellaswag", action="store_true", help="Run HellaSwag multiple-choice test")
+    parser = argparse.ArgumentParser(description="Analyze a GPT-style checkpoint")
+    parser.add_argument(
+        "checkpoint",
+        type=str,
+        nargs="?",  # Make checkpoint argument optional
+        default=None,
+        help="Path to the checkpoint directory or HuggingFace model ID. If not provided, uses the latest checkpoint in the checkpoints directory."
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cuda" if torch.cuda.is_available() else "cpu",
+        help="Device to run on (default: cuda if available else cpu)"
+    )
+    parser.add_argument(
+        "--samples",
+        type=int,
+        default=100,
+        help="Number of samples to use for evaluation (default: 100)"
+    )
+    parser.add_argument(
+        "--summarise",
+        action="store_true",
+        help="Run summarisation metrics (requires datasets and rouge_score)"
+    )
+    parser.add_argument(
+        "--truthfulqa",
+        action="store_true",
+        help="Run TruthfulQA evaluation (requires datasets)"
+    )
+    parser.add_argument(
+        "--hellaswag",
+        action="store_true",
+        help="Run HellaSwag evaluation (requires datasets)"
+    )
     args = parser.parse_args()
 
     device = torch.device(args.device)
-    model, tokenizer = load_model(args.checkpoint, device)
+    print(f"Using device: {device}")
+
+    # Handle default checkpoint
+    if args.checkpoint is None:
+        # Look for checkpoints in the checkpoints directory
+        checkpoint_dir = 'checkpoints'
+        checkpoints = sorted(
+            [d for d in os.listdir(checkpoint_dir) if d.startswith('checkpoint-')],
+            key=lambda x: int(x.split('-')[-1]) if x.split('-')[-1].isdigit() else -1,
+            reverse=True
+        )
+        
+        if not checkpoints:
+            print("No checkpoint found. Please specify a checkpoint path or train the model first.")
+            return
+            
+        args.checkpoint = os.path.join(checkpoint_dir, checkpoints[0])
+        print(f"Using latest checkpoint: {args.checkpoint}")
+    
+    # Ensure checkpoint exists
+    if not os.path.exists(args.checkpoint):
+        print(f"Error: Checkpoint not found at {args.checkpoint}")
+        return
+
+    # Load model and tokenizer
+    print(f"Loading model from {args.checkpoint}...")
+    try:
+        model, tokenizer = load_model(args.checkpoint, device)
+    except Exception as e:
+        print(f"Error loading model: {str(e)}")
+        return
 
     report_model(model, tokenizer)
 

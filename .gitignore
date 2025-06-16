@@ -88,3 +88,4 @@ zero_stage_*
 dataset_cache/ 
 
 tutel/
+checkpoints/

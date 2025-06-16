@@ -39,32 +39,83 @@ class ProgressCallback(TrainerCallback):
         self.total_steps = None
         self.current_step = 0
         self.start_time = None
+        self.last_log_time = 0
+        self.log_interval = 10  # Log every 10 steps
+
+    def format_time(self, seconds):
+        """Format seconds to HH:MM:SS"""
+        if seconds <= 0:
+            return "--:--:--"
+        m, s = divmod(int(seconds), 60)
+        h, m = divmod(m, 60)
+        return f"{h:02d}:{m:02d}:{s:02d}"
 
     def on_train_begin(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
         import time
         self.total_steps = state.max_steps
-        self.pbar = tqdm(total=self.total_steps, desc="Training Progress", dynamic_ncols=True)
         self.start_time = time.time()
-        logger.info(f"Training started: {self.total_steps} steps expected.")
+        self.last_log_time = self.start_time
+        
+        # Initialize progress bar with more detailed format
+        self.pbar = tqdm(
+            total=self.total_steps,
+            desc="[Training]",
+            dynamic_ncols=True,
+            bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]'
+        )
+        
+        logger.info(f"🚀 Starting training for {self.total_steps} steps")
+        if args.local_rank in [-1, 0]:
+            logger.info(f"  Batch size per device = {args.per_device_train_batch_size}")
+            logger.info(f"  Total train batch size = {args.per_device_train_batch_size * args.world_size}")
+            logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
 
     def on_step_end(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
         import time
+        current_time = time.time()
         self.current_step = state.global_step
-        self.pbar.update(1)
-        elapsed = time.time() - self.start_time if self.start_time else 0
+        
+        # Calculate metrics
+        elapsed = current_time - self.start_time
         steps_done = self.current_step
         steps_left = self.total_steps - steps_done
-        eta = (elapsed / steps_done * steps_left) if steps_done > 0 else 0
-        # Format ETA as H:MM:SS
-        def format_eta(seconds):
-            if seconds <= 0:
-                return "--:--:--"
-            m, s = divmod(int(seconds), 60)
-            h, m = divmod(m, 60)
-            return f"{h:d}:{m:02d}:{s:02d}"
-        eta_str = format_eta(eta)
-        self.pbar.set_postfix({"ETA": eta_str})
-        if steps_done % 100 == 0 or steps_done == self.total_steps:
+        
+        # Calculate ETA
+        steps_per_sec = steps_done / elapsed if elapsed > 0 else 0
+        eta = steps_left / steps_per_sec if steps_per_sec > 0 else 0
+        
+        # Update progress bar
+        self.pbar.update(1)
+        self.pbar.set_postfix({
+            'loss': f"{state.log_history[-1].get('loss', 0):.4f}" if state.log_history else 'N/A',
+            'lr': f"{state.log_history[-1].get('learning_rate', 0):.2e}" if state.log_history else 'N/A',
+            'ETA': self.format_time(eta)
+        })
+        
+        # Log detailed progress periodically
+        if (current_time - self.last_log_time > 30 or  # Every 30 seconds
+            steps_done % 100 == 0 or 
+            steps_done == self.total_steps):
+            
+            progress_pct = (steps_done / self.total_steps) * 100
+            elapsed_str = self.format_time(elapsed)
+            eta_str = self.format_time(eta)
+            
+            logger.info(
+                f"📊 Step {steps_done}/{self.total_steps} "
+                f"({progress_pct:.1f}%) | "
+                f"Loss: {state.log_history[-1].get('loss', 0):.4f} | "
+                f"LR: {state.log_history[-1].get('learning_rate', 0):.2e} | "
+                f"Elapsed: {elapsed_str} | "
+                f"ETA: {eta_str}"
+            )
+            self.last_log_time = current_time
+            
+        # Final log at the end of training
+        if steps_done == self.total_steps:
+            total_time = self.format_time(elapsed)
+            logger.info(f"\n✨ Training completed in {total_time} ✨")
+            self.pbar.close()
             logger.info(f"Step {self.current_step}/{self.total_steps} - ETA: {eta_str}")
         if state.log_history and len(state.log_history) > 0:
             last_log = state.log_history[-1]
@@ -258,85 +309,95 @@ def main():
     from moe_model import GPT2WithMoE
     model = GPT2WithMoE(cfg)
 
-    # Training arguments with native PyTorch optimizations
+    # Training arguments with basic checkpointing
     training_args = TrainingArguments(
         output_dir=args.output_dir,
-        per_device_train_batch_size=1,  # Minimal batch size
-        gradient_accumulation_steps=1,  # No gradient accumulation
-        gradient_checkpointing=True,  # Critical for memory efficiency
         num_train_epochs=args.epochs,
-        learning_rate=1e-5,  # Very small learning rate
-        lr_scheduler_type="linear",  # Linear learning rate schedule
-        optim="adamw_torch",  # Using torch's native AdamW
-        fp16=True,  # Enable mixed precision training
-        
-        # Disable evaluation and saving
-        do_eval=False,
-        save_strategy="no",
-        save_steps=None,
-        save_total_limit=0,
-        
+        per_device_train_batch_size=1,
+        gradient_accumulation_steps=1,
+        learning_rate=1e-5,
+        weight_decay=0.01,
+        warmup_ratio=0.1,
         # Logging
-        logging_steps=1,
+        logging_steps=10,  # Log every 10 steps
         logging_first_step=True,
-        logging_dir=None,
-        log_level="warning",
-        
-        # Performance optimizations
-        dataloader_num_workers=0,  # No multiprocessing
-        dataloader_pin_memory=False,  # Disabled to save memory
-        remove_unused_columns=True,  # Clean up unused columns
-        group_by_length=False,  # Disable to simplify
+        logging_dir=os.path.join(args.output_dir, 'logs'),
+        # Checkpointing
+        save_steps=100,  # Save checkpoint every 100 steps
+        save_total_limit=3,  # Keep only 3 checkpoints
+        # Performance
+        fp16=True,
+        dataloader_num_workers=0,
+        disable_tqdm=True,  # We use our own progress bar
+        remove_unused_columns=True,
         max_grad_norm=1.0,  # Gradient clipping
-        
-        # Disable progress bar
-        disable_tqdm=True,
-        
-        # No distributed training
         local_rank=-1,
         no_cuda=False,
-        
-        # Disable all reporting
-        report_to=[],
-        
-        # Disable all metrics
-        load_best_model_at_end=False,
-        metric_for_best_model=None,
-        greater_is_better=None,
     )
 
     data_collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer,
         mlm=False,
-        pad_to_multiple_of=None,
+        pad_to_multiple_of=8,  # Optimize for tensor cores
         return_tensors="pt",
     )
 
-    # Create a custom trainer that disables all checkpointing
-    class NoSaveTrainer(Trainer):
-        def _save_checkpoint(self, model, trial, metrics=None):
-            # Completely disable checkpoint saving
-            return None
-            
-        def _save(self, output_dir, state_dict=None):
-            # Disable all model saving
-            return None
-
-    # Create a simple trainer without any checkpointing
-    class SimpleTrainer(Trainer):
-        def _save_checkpoint(self, model, trial, metrics=None):
-            return None
-            
-        def _save(self, output_dir, state_dict=None):
-            return None
+    # Initialize callbacks
+    progress_callback = ProgressCallback()
     
-    trainer = SimpleTrainer(
+    # Create output directory if it doesn't exist
+    os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(os.path.join(args.output_dir, 'logs'), exist_ok=True)
+    
+    # Create a custom trainer with safetensors saving
+    class CustomTrainer(Trainer):
+        def _save(self, output_dir=None, state_dict=None):
+            # Save only the model state dict to avoid DTensor issues
+            output_dir = output_dir if output_dir is not None else self.args.output_dir
+            os.makedirs(output_dir, exist_ok=True)
+            
+            # Save model using safetensors
+            from safetensors.torch import save_file
+            model_path = os.path.join(output_dir, "model.safetensors")
+            save_file(self.model.state_dict(), model_path)
+            
+            # Also save as pytorch format for compatibility
+            torch.save(self.model.state_dict(), os.path.join(output_dir, "pytorch_model.bin"))
+            
+            # Save config
+            self.model.config.save_pretrained(output_dir)
+            
+            # Save tokenizer
+            if hasattr(self, 'tokenizer') and self.tokenizer is not None:
+                self.tokenizer.save_pretrained(output_dir)
+            
+            logger.info(f"Model saved to {output_dir}")
+            
+        def _load_from_checkpoint(self, resume_from_checkpoint, model=None):
+            # Custom load to handle safetensors
+            from safetensors.torch import load_file
+            import os
+            
+            model = self.model if model is None else model
+            
+            # Try loading from safetensors first
+            safetensors_path = os.path.join(resume_from_checkpoint, "model.safetensors")
+            if os.path.exists(safetensors_path):
+                state_dict = load_file(safetensors_path)
+                model.load_state_dict(state_dict, strict=False)
+                return model
+                
+            # Fall back to default loading
+            return super()._load_from_checkpoint(resume_from_checkpoint, model)
+    
+    # Initialize trainer with custom saving
+    trainer = CustomTrainer(
         model=model,
         args=training_args,
         train_dataset=train_ds,
-        eval_dataset=None,  # Disable evaluation
+        eval_dataset=val_ds,
         data_collator=data_collator,
-        callbacks=None,  # No callbacks
+        callbacks=[progress_callback],
     )
 
     # Train the model
