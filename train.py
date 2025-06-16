@@ -10,7 +10,7 @@ from datetime import datetime
 import pathlib
 
 # Insert a constant MODEL_SCALE (0.8) after the imports so that model size is reduced by 20%
-MODEL_SCALE = 0.8
+MODEL_SCALE = 1.0
 
 # Ensure tokenizers parallelism disabled
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
@@ -234,7 +234,7 @@ def main():
         learning_rate=5e-5,
         lr_scheduler_type="cosine",
         optim="adamw_bnb_8bit",
-        fp16=False,
+        fp16=True,
         evaluation_strategy="steps",
         eval_steps=100,
         save_steps=500,

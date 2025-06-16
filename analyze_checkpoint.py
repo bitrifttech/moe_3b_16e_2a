@@ -216,26 +216,62 @@ def choice_logprob(model, tokenizer, context: str, choice: str, device: torch.de
 # TruthfulQA evaluation
 # -----------------------------------------------------------------------------
 
-def truthfulqa_eval(model, tokenizer, device: torch.device, samples: int = 50):
-    try:
-        from datasets import load_dataset
-    except ImportError:
-        print("Skipping TruthfulQA – install 'datasets' to enable.")
-        return None
-    ds = load_dataset("truthful_qa", "multiple_choice")
-    ds = ds["validation"].select(range(samples))
+def truthfulqa_eval(model, tokenizer, device, samples=100):
+    """Evaluate model on TruthfulQA dataset."""
+    from datasets import load_dataset
+    import numpy as np
+    from tqdm import tqdm
+
+    print("TruthfulQA test …")
+    dataset = load_dataset("truthful_qa", "generation")
+    dataset = dataset["validation"]
+    if samples:
+        dataset = dataset.select(range(min(samples, len(dataset))))
 
     correct = 0
-    for ex in ds:
-        ctx = ex["question"]
-        choices = ex["answer_choices"]
-        gold = ex["correct_answers"]
-        scores = [choice_logprob(model, tokenizer, ctx, c, device) for c in choices]
-        picked = choices[int(torch.tensor(scores).argmax())]
-        if picked in gold:
+    total = 0
+    for ex in tqdm(dataset, desc="TruthfulQA"):
+        question = ex["question"]
+        # Get the correct answer from the dataset
+        correct_answer = ex["correct_answers"][0] if ex["correct_answers"] else ""
+        
+        # Generate answer
+        prompt = f"Q: {question}\nA:"
+        inputs = tokenizer(prompt, return_tensors="pt").to(device)
+        if hasattr(model, 'generate'):
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=50,
+                num_return_sequences=1,
+                do_sample=True,
+                temperature=0.7,
+                top_p=0.9,
+                pad_token_id=tokenizer.eos_token_id
+            )
+        else:
+            # Manual greedy decoding loop
+            input_ids = inputs['input_ids']
+            attention_mask = inputs.get('attention_mask', None)
+            max_new_tokens = 50
+            for _ in range(max_new_tokens):
+                outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+                next_token_logits = outputs["logits"][:, -1, :]
+                next_token_id = next_token_logits.argmax(dim=-1, keepdim=True)
+                input_ids = torch.cat([input_ids, next_token_id], dim=-1)
+                if next_token_id.item() == tokenizer.eos_token_id:
+                    break
+            outputs = input_ids
+        generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        answer = generated_text.split("A:")[-1].strip()
+        
+        # Simple exact match for now
+        if correct_answer.lower() in answer.lower():
             correct += 1
-    acc = correct / len(ds)
-    return acc
+        total += 1
+
+    accuracy = correct / total if total > 0 else 0
+    print(f"TruthfulQA accuracy: {accuracy:.3f}")
+    return accuracy
 
 # -----------------------------------------------------------------------------
 # HellaSwag evaluation
@@ -247,7 +283,7 @@ def hellaswag_eval(model, tokenizer, device: torch.device, samples: int = 100):
     except ImportError:
         print("Skipping HellaSwag – install 'datasets' to enable.")
         return None
-    ds = load_dataset("hellaswag", split="validation[:{}]".format(samples))
+    ds = load_dataset("hellaswag", split="validation[:{}]".format(samples), trust_remote_code=True)
 
     correct = 0
     for ex in ds:

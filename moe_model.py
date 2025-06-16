@@ -3,7 +3,7 @@ import torch.nn as nn
 from transformers import GPT2Config, GPT2PreTrainedModel, AutoModelForCausalLM
 from tutel import moe as tutel_moe
 
-NUM_EXPERTS = 8  # Reduce number of experts per device to lower memory footprint
+NUM_EXPERTS = 16  # Match build plan: 16 experts per device
 
 class MoEBlock(nn.Module):
     """Top‑2 MoE feed‑forward layer using Tutel"""
