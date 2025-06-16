@@ -271,12 +271,19 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # Load a small subset of the dataset for testing
+    # Load a simple text dataset for testing
+    print("Loading wikitext dataset for testing...")
     dataset = load_dataset("wikitext", "wikitext-2-raw-v1")
+    
+    # Filter out empty texts
+    dataset = dataset.filter(lambda x: len(x["text"].strip()) > 0)
+    
+    # Take a small subset for training and validation
     train_ds = dataset["train"].select(range(100))  # Small subset for testing
     val_ds = dataset["validation"].select(range(20))  # Small validation set
 
     def tokenize_function(examples):
+        # Simple tokenization with padding and truncation
         return tokenizer(
             examples["text"],
             truncation=True,
@@ -284,7 +291,8 @@ def main():
             padding="max_length",
             return_tensors="pt"
         )
-
+        
+    # Apply tokenization
     train_ds = train_ds.map(tokenize_function, batched=True, remove_columns=["text"])
     val_ds = val_ds.map(tokenize_function, batched=True, remove_columns=["text"])
 
@@ -346,11 +354,10 @@ def main():
         no_cuda=False,
     )
 
+    # Use standard data collator for language modeling
     data_collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer,
-        mlm=False,
-        pad_to_multiple_of=8,  # Optimize for tensor cores
-        return_tensors="pt",
+        mlm=False,  # No masked language modeling
     )
 
     # Initialize callbacks
