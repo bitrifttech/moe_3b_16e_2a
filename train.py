@@ -232,25 +232,40 @@ def seed_all(seed=42):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
-def load_data(tok, max_len=1024):
+def load_openassistant_dataset(tok, max_len=256):
+    """Load and preprocess the OpenAssistant OASST1 dataset."""
+    from datasets import load_dataset, DatasetDict, concatenate_datasets
+    
+    print("Loading OpenAssistant OASST1 dataset from HuggingFace...")
     ds = load_dataset("OpenAssistant/oasst1")
-    # If ds is a DatasetDict, concatenate all splits
-    if isinstance(ds, dict):
-        from datasets import concatenate_datasets
+    
+    print("Processing dataset...")
+    # If the dataset has multiple splits, concatenate them
+    if isinstance(ds, DatasetDict):
         ds = concatenate_datasets([ds[k] for k in ds.keys()])
-    # Now filter
-    ds = ds.filter(lambda x: x["lang"] == "en" and x["role"] == "assistant")
-    # Now split
+    
+    print("Filtering for English assistant responses...")
+    # Filter for English assistant responses
+    ds = ds.filter(lambda x: x.get("lang") == "en" and x.get("role") == "assistant")
+    
+    print("Splitting into train/validation...")
+    # Split into train and validation
     split = ds.train_test_split(test_size=0.05, seed=42)
+    
     def tok_fn(batch):
-        # Tokenise without padding; dynamic padding will be added by the data collator.
-        # This prevents sequences made entirely of pad tokens which caused zero loss.
+        # Tokenize without padding; dynamic padding will be added by the data collator
         return tok(batch["text"], truncation=True, max_length=max_len)
+    
+    print("Tokenizing training set...")
     train_ds = split["train"].map(tok_fn, batched=True, remove_columns=split["train"].column_names)
+    
+    print("Tokenizing validation set...")
     val_ds = split["test"].map(tok_fn, batched=True, remove_columns=split["test"].column_names)
-    # Remove examples that became empty after tokenisation
+    
+    # Remove examples that became empty after tokenization
     train_ds = train_ds.filter(lambda x: len(x["input_ids"]) > 1)
     val_ds = val_ds.filter(lambda x: len(x["input_ids"]) > 1)
+    
     return train_ds, val_ds
 
 def main():
@@ -271,33 +286,17 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # Load the full dataset
-    print("Loading the full wikitext dataset...")
-    dataset = load_dataset("wikitext", "wikitext-2-raw-v1")
-    
-    # Filter out empty texts
-    dataset = dataset.filter(lambda x: len(x["text"].strip()) > 0)
-    
-    # Use full training and validation sets
-    train_ds = dataset["train"]
-    val_ds = dataset["validation"]
+    # Load OpenAssistant dataset
+    print("Loading OpenAssistant OASST1 dataset...")
+    train_ds, val_ds = load_openassistant_dataset(
+        tokenizer,
+        max_len=256
+    )
     
     print(f"Training samples: {len(train_ds)}")
     print(f"Validation samples: {len(val_ds)}")
-
-    def tokenize_function(examples):
-        # Simple tokenization with padding and truncation
-        return tokenizer(
-            examples["text"],
-            truncation=True,
-            max_length=256,
-            padding="max_length",
-            return_tensors="pt"
-        )
-        
-    # Apply tokenization
-    train_ds = train_ds.map(tokenize_function, batched=True, remove_columns=["text"])
-    val_ds = val_ds.map(tokenize_function, batched=True, remove_columns=["text"])
+    
+    # Tokenization is already handled in load_openassistant_dataset
 
     # Model configuration - reduced size for 16GB GPU
     cfg = GPT2Config(
