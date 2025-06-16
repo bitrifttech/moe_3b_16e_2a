@@ -86,21 +86,104 @@ def human_count(n: int) -> str:
 
 
 def load_model(checkpoint: str, device: torch.device):
-    """Load a checkpoint. Tries custom GPT2WithMoE first, then generic."""
+    """Load a checkpoint with support for MoE models."""
     checkpoint_path = Path(checkpoint)
     if not checkpoint_path.exists():
-        raise FileNotFoundError(checkpoint)
+        raise FileNotFoundError(f"Checkpoint not found at {checkpoint_path}")
 
-    # Auto detection of custom architecture
+    print(f"Loading model from {checkpoint_path}...")
+    
+    # Suppress specific warnings
+    import warnings
+    warnings.filterwarnings("ignore", message=".*Could not find parameter.*")
+    warnings.filterwarnings("ignore", message=".*wasn't found in model.safetensors.*")
+    warnings.filterwarnings("ignore", message=".*You should probably TRAIN this model on a down-stream task.*")
+    
+    # Load config first
+    config_path = checkpoint_path / "config.json"
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found at {config_path}")
+    
+    # Try loading as standard model first (simpler approach)
     try:
-        from moe_model import GPT2WithMoE  # noqa: F401
-        model_cls = GPT2WithMoE
-        model = model_cls.from_pretrained(checkpoint_path, torch_dtype=torch.float32)
-        tokenizer = AutoTokenizer.from_pretrained(checkpoint_path, use_fast=True)
-        model.to(device)
+        print("Attempting to load as standard model...")
+        model = AutoModelForCausalLM.from_pretrained(
+            str(checkpoint_path),
+            trust_remote_code=True,  # Needed for custom models
+            torch_dtype=torch.float16 if 'cuda' in str(device) else torch.float32,
+            device_map='auto'
+        )
+        
+        # Move model to device if not using device_map='auto'
+        if not hasattr(model, 'hf_device_map'):
+            model = model.to(device)
+            
+        # Load tokenizer
+        tokenizer = AutoTokenizer.from_pretrained(
+            str(checkpoint_path),
+            use_fast=True,
+            trust_remote_code=True
+        )
+        
+        # Set padding token if not set
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+            
+        print("Successfully loaded standard model")
         return model, tokenizer
-    except Exception:
-        # Fallback to generic
+        
+    except Exception as e:
+        print(f"Failed to load as standard model: {e}")
+        print("Falling back to MoE model loading...")
+    
+    # Try loading as MoE model
+    try:
+        print("Attempting to load as MoE model...")
+        # Import here to avoid circular imports
+        from moe_model import GPT2WithMoE
+        
+        # Load config
+        config = AutoConfig.from_pretrained(str(checkpoint_path))
+        
+        # Initialize model
+        model = GPT2WithMoE(config)
+        
+        # Try to find and load weights
+        weight_files = list(checkpoint_path.glob("*.bin")) + list(checkpoint_path.glob("*.safetensors"))
+        if not weight_files:
+            raise FileNotFoundError("No model weights found in checkpoint")
+            
+        # Load the first weight file found
+        weight_file = weight_files[0]
+        print(f"Loading weights from {weight_file}")
+        
+        if weight_file.suffix == '.safetensors':
+            from safetensors.torch import load_file
+            state_dict = load_file(weight_file, device='cpu')
+        else:
+            state_dict = torch.load(weight_file, map_location='cpu')
+        
+        # Load state dict with strict=False to handle architecture changes
+        model.load_state_dict(state_dict, strict=False)
+        model = model.to(device)
+        
+        # Load tokenizer
+        tokenizer = AutoTokenizer.from_pretrained(
+            str(checkpoint_path),
+            use_fast=True,
+            trust_remote_code=True
+        )
+        
+        # Set padding token if not set
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+            
+        print("Successfully loaded MoE model")
+        return model, tokenizer
+        
+    except Exception as e:
+        print(f"Failed to load MoE model: {e}")
+        raise ValueError("Failed to load model with any available method")
         cfg = AutoConfig.from_pretrained(checkpoint_path)
         model = AutoModelForCausalLM.from_pretrained(checkpoint_path, config=cfg)
         tokenizer = AutoTokenizer.from_pretrained(checkpoint_path, use_fast=True)

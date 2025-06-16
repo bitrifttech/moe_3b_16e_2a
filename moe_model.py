@@ -5,40 +5,93 @@ from transformers.generation import GenerationMixin
 from tutel import moe as tutel_moe
 
 NUM_EXPERTS = 16
+
 class MoEBlock(nn.Module):
     """Top‑2 MoE feed‑forward layer using Tutel"""
-    def __init__(self, d_model, d_ff, num_experts=NUM_EXPERTS, k=2):
+    def __init__(self, d_model, d_ff, num_experts, k=2):
         super().__init__()
+        self.d_model = d_model
+        self.d_ff = d_ff
+        self.num_experts = num_experts
+        self.k = k
+        
+        # Define expert configuration according to Tutel's expected format
+        expert_config = {
+            'type': 'ffn',  # Specify the expert type as feed-forward network
+            'count_per_node': self.num_experts,
+            'hidden_size_per_expert': self.d_ff,
+            'output_dim': d_model,  # Match output dim to model dim
+            'activation_fn': lambda x: torch.nn.functional.gelu(x),  # Use callable activation
+        }
+        
+        # Initialize MoE layer with simplified configuration
         self.moe = tutel_moe.moe_layer(
-            gate_type={'type': 'top', 'k': k},
-            model_dim=d_model,
-            experts={
-                'num_experts_per_device': num_experts,
-                'type': 'ffn',
-                'hidden_size_per_expert': d_ff,
-                'activation_fn': lambda x: torch.nn.functional.gelu(x)
-            }
+            gate_type={'type': 'top', 'k': self.k},
+            model_dim=self.d_model,
+            experts=expert_config,
+            scan_expert_func=lambda name, param: setattr(param, 'skip_allreduce', True),
+            seeds=(1, 1),
+            batch_prioritized_routing=True
         )
+        
+        # Store expert parameters for initialization
+        self.experts = self.moe.experts
 
     def forward(self, x):
         return self.moe(x)
+        
+    def init_from_mlp(self, mlp):
+        """Initialize MoE experts from a standard MLP layer"""
+        with torch.no_grad():
+            if hasattr(self.experts, 'experts'):
+                # Handle case where experts is a wrapper object
+                experts = self.experts.experts
+            else:
+                # Handle case where experts is directly accessible
+                experts = [self.experts]
+                
+            for expert in experts:
+                if hasattr(expert, 'fc1'):
+                    expert.fc1.weight.copy_(mlp.c_fc.weight.data)
+                    if hasattr(mlp.c_fc, 'bias') and expert.fc1.bias is not None:
+                        expert.fc1.bias.copy_(mlp.c_fc.bias.data)
+                    expert.fc2.weight.copy_(mlp.c_proj.weight.data)
+                    if hasattr(mlp.c_proj, 'bias') and expert.fc2.bias is not None:
+                        expert.fc2.bias.copy_(mlp.c_proj.bias.data)
 
 class GPT2WithMoE(GPT2PreTrainedModel, GenerationMixin):
     """GPT‑2 backbone where every second MLP is replaced by MoEBlock"""
     def __init__(self, config: GPT2Config):
+        config_class = type(config)
+        # Initialize with the parent class
         super().__init__(config)
-        base = AutoModelForCausalLM.from_config(config)
-        self.transformer = base.transformer
+        
+        # Initialize base model
+        self.transformer = AutoModelForCausalLM.from_config(config).transformer
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        
+        # Initialize weights and apply final processing
+        self.post_init()
+        
+        # Store the config class for proper serialization
+        self.config_class = config_class
 
+        # Initialize MoE layers
         for idx, block in enumerate(self.transformer.h):
             if idx % 2 == 0:
-                block.mlp = MoEBlock(
+                # Store the original MLP weights for initialization
+                original_mlp = block.mlp
+                moe_block = MoEBlock(
                     d_model=config.n_embd,
                     d_ff=config.n_inner,
                     num_experts=NUM_EXPERTS,
                     k=2
                 )
+                # Initialize MoE experts with the original MLP weights
+                moe_block.init_from_mlp(original_mlp)
+                block.mlp = moe_block
+        
+        # Apply final processing again after MoE initialization
         self.post_init()
 
     def forward(self, input_ids, attention_mask=None, labels=None, **kwargs):

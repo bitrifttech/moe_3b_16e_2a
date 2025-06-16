@@ -1,6 +1,17 @@
-import argparse, random, os, torch, glob
+import os
+import torch
+import logging
+import argparse
+import numpy as np
+from typing import Optional
+from tqdm import tqdm
 from datasets import load_dataset
-from transformers import AutoTokenizer, GPT2Config, Trainer, TrainingArguments, DataCollatorForLanguageModeling
+from torch.utils.data import Dataset, DataLoader
+from transformers import (
+    GPT2Config, GPT2Tokenizer, AutoTokenizer, Trainer, TrainingArguments,
+    default_data_collator, set_seed
+)
+from transformers import DataCollatorForLanguageModeling
 from bitsandbytes.optim import Adam8bit
 import logging
 from tqdm.auto import tqdm
@@ -351,18 +362,23 @@ def main():
     
     # Create a custom trainer with safetensors saving
     class CustomTrainer(Trainer):
-        def _save(self, output_dir=None, state_dict=None):
-            # Save only the model state dict to avoid DTensor issues
+        def _save(self, output_dir: Optional[str] = None, state_dict=None):
             output_dir = output_dir if output_dir is not None else self.args.output_dir
             os.makedirs(output_dir, exist_ok=True)
             
-            # Save model using safetensors
-            from safetensors.torch import save_file
-            model_path = os.path.join(output_dir, "model.safetensors")
-            save_file(self.model.state_dict(), model_path)
+            # Create a new state dict without shared tensors
+            state_dict = {}
+            for name, param in self.model.named_parameters():
+                if param is not None:
+                    state_dict[name] = param.detach().clone()
             
-            # Also save as pytorch format for compatibility
-            torch.save(self.model.state_dict(), os.path.join(output_dir, "pytorch_model.bin"))
+            # Save using safetensors
+            model_path = os.path.join(output_dir, "model.safetensors")
+            from safetensors.torch import save_file
+            save_file(state_dict, model_path)
+            
+            # Also save using PyTorch's native format as a fallback
+            torch.save(state_dict, os.path.join(output_dir, "pytorch_model.bin"))
             
             # Save config
             self.model.config.save_pretrained(output_dir)
