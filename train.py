@@ -193,63 +193,117 @@ def load_data(tok, max_len=1024):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--output_dir", default="./outputs")
-    parser.add_argument("--epochs", type=int, default=3)
-    parser.add_argument("--use_deepspeed", action="store_true")
+    parser.add_argument("--output_dir", type=str, default="outputs")
+    parser.add_argument("--epochs", type=int, default=1)
     args = parser.parse_args()
 
-    seed_all()
-
-    tokenizer = AutoTokenizer.from_pretrained("gpt2")
-    tokenizer.pad_token = tokenizer.eos_token
-
-    train_ds, val_ds = load_data(tokenizer)
-
-    cfg = GPT2Config(
-        vocab_size=tokenizer.vocab_size,
-        n_positions=1024,
-        n_embd=int(1280 * MODEL_SCALE),
-        n_layer=int(24 * MODEL_SCALE),
-        n_head=int(20 * MODEL_SCALE),
-        n_inner=int(5120 * MODEL_SCALE),
-        pad_token_id=tokenizer.pad_token_id
+    # Set up logging
+    logging.basicConfig(
+        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+        datefmt="%m/%d/%Y %H:%M:%S",
+        level=logging.INFO,
     )
 
-    # After initial imports but BEFORE importing moe_model, set LD_LIBRARY_PATH
-    _torch_lib = pathlib.Path(torch.__file__).parent / 'lib'
-    _prev_ld = os.environ.get('LD_LIBRARY_PATH', '')
-    os.environ['LD_LIBRARY_PATH'] = f"{_torch_lib}:{_prev_ld}" if str(_torch_lib) not in _prev_ld else _prev_ld
-    # re-prepend for current process via ctypes util
-    import ctypes, ctypes.util
-    ctypes.CDLL(str(_torch_lib / 'libc10.so'), mode=ctypes.RTLD_GLOBAL)
+    # Load tokenizer and dataset
+    tokenizer = AutoTokenizer.from_pretrained("gpt2")
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    # Load a small subset of the dataset for testing
+    dataset = load_dataset("wikitext", "wikitext-2-raw-v1")
+    train_ds = dataset["train"].select(range(100))  # Small subset for testing
+    val_ds = dataset["validation"].select(range(20))  # Small validation set
+
+    def tokenize_function(examples):
+        return tokenizer(
+            examples["text"],
+            truncation=True,
+            max_length=256,
+            padding="max_length",
+            return_tensors="pt"
+        )
+
+    train_ds = train_ds.map(tokenize_function, batched=True, remove_columns=["text"])
+    val_ds = val_ds.map(tokenize_function, batched=True, remove_columns=["text"])
+
+    # Model configuration - reduced size for 16GB GPU
+    cfg = GPT2Config(
+        vocab_size=len(tokenizer),
+        n_positions=256,  # Reduced context length
+        n_embd=768,  # Reduced from 1024
+        n_layer=6,  # Reduced from 12
+        n_head=12,  # Reduced from 16
+        n_inner=3072,  # Reduced from 4096
+        activation_function="gelu_new",
+        resid_pdrop=0.1,
+        embd_pdrop=0.1,
+        attn_pdrop=0.1,
+        layer_norm_epsilon=1e-5,
+        initializer_range=0.02,
+        summary_type="cls_index",
+        summary_use_proj=True,
+        summary_activation=None,
+        summary_proj_to_labels=True,
+        summary_first_dropout=0.1,
+        use_cache=True,
+        bos_token_id=tokenizer.bos_token_id,
+        eos_token_id=tokenizer.eos_token_id,
+        pad_token_id=tokenizer.pad_token_id,
+        num_labels=1,
+        output_attentions=False,
+        output_hidden_states=False,
+        return_dict=True,
+    )
 
     from moe_model import GPT2WithMoE
     model = GPT2WithMoE(cfg)
 
+    # Training arguments with native PyTorch optimizations
     training_args = TrainingArguments(
         output_dir=args.output_dir,
-        per_device_train_batch_size=1,
-        gradient_accumulation_steps=16,
+        per_device_train_batch_size=1,  # Minimal batch size
+        gradient_accumulation_steps=1,  # No gradient accumulation
+        gradient_checkpointing=True,  # Critical for memory efficiency
         num_train_epochs=args.epochs,
-        learning_rate=5e-5,
-        lr_scheduler_type="cosine",
-        optim="adamw_bnb_8bit",
-        fp16=True,
-        eval_strategy="steps",
-        eval_steps=100,
-        save_steps=500,
+        learning_rate=1e-5,  # Very small learning rate
+        lr_scheduler_type="linear",  # Linear learning rate schedule
+        optim="adamw_torch",  # Using torch's native AdamW
+        fp16=True,  # Enable mixed precision training
+        
+        # Disable evaluation and saving
+        do_eval=False,
+        save_strategy="no",
+        save_steps=None,
+        save_total_limit=0,
+        
+        # Logging
         logging_steps=1,
-        save_total_limit=2,
-        deepspeed="./ds_config.json" if args.use_deepspeed else None
+        logging_first_step=True,
+        logging_dir=None,
+        log_level="warning",
+        
+        # Performance optimizations
+        dataloader_num_workers=0,  # No multiprocessing
+        dataloader_pin_memory=False,  # Disabled to save memory
+        remove_unused_columns=True,  # Clean up unused columns
+        group_by_length=False,  # Disable to simplify
+        max_grad_norm=1.0,  # Gradient clipping
+        
+        # Disable progress bar
+        disable_tqdm=True,
+        
+        # No distributed training
+        local_rank=-1,
+        no_cuda=False,
+        
+        # Disable all reporting
+        report_to=[],
+        
+        # Disable all metrics
+        load_best_model_at_end=False,
+        metric_for_best_model=None,
+        greater_is_better=None,
     )
-
-    class FirstCheckpointCallback(TrainerCallback):
-        def __init__(self):
-            self.done = False
-        def on_step_end(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
-            if not self.done and state.global_step >= 1:
-                control.should_save = True
-                self.done = True
 
     data_collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer,
@@ -258,29 +312,34 @@ def main():
         return_tensors="pt",
     )
 
-    trainer = Trainer(
+    # Create a custom trainer that disables all checkpointing
+    class NoSaveTrainer(Trainer):
+        def _save_checkpoint(self, model, trial, metrics=None):
+            # Completely disable checkpoint saving
+            return None
+            
+        def _save(self, output_dir, state_dict=None):
+            # Disable all model saving
+            return None
+
+    # Create a simple trainer without any checkpointing
+    class SimpleTrainer(Trainer):
+        def _save_checkpoint(self, model, trial, metrics=None):
+            return None
+            
+        def _save(self, output_dir, state_dict=None):
+            return None
+    
+    trainer = SimpleTrainer(
         model=model,
         args=training_args,
         train_dataset=train_ds,
-        eval_dataset=val_ds,
+        eval_dataset=None,  # Disable evaluation
         data_collator=data_collator,
-        callbacks=[ProgressCallback(), CheckpointInfoCallback(), FirstCheckpointCallback()]
+        callbacks=None,  # No callbacks
     )
 
-    # Find latest checkpoint if exists
-    checkpoint_dir = args.output_dir
-    checkpoints = sorted(glob.glob(f"{checkpoint_dir}/checkpoint-*"), key=lambda x: int(x.split('-')[-1]) if x.split('-')[-1].isdigit() else -1)
-    resume_checkpoint = checkpoints[-1] if checkpoints else None
-    if resume_checkpoint:
-        logger.info(f"Resuming training from checkpoint: {resume_checkpoint}")
-        try:
-            trainer.train(resume_from_checkpoint=resume_checkpoint)
-            return
-        except ValueError as e:
-            logger.warning(f"Failed to load checkpoint ({e}), starting from scratch.")
-    else:
-        logger.info("No checkpoint found. Starting training from scratch.")
-
+    # Train the model
     trainer.train()
 
 if __name__ == "__main__":

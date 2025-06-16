@@ -4,7 +4,6 @@ from transformers import GPT2Config, GPT2PreTrainedModel, AutoModelForCausalLM
 from tutel import moe as tutel_moe
 
 NUM_EXPERTS = 8
-
 class MoEBlock(nn.Module):
     """Top‑2 MoE feed‑forward layer using Tutel"""
     def __init__(self, d_model, d_ff, num_experts=NUM_EXPERTS, k=2):
