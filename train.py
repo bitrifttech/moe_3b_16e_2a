@@ -271,16 +271,19 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # Load a simple text dataset for testing
-    print("Loading wikitext dataset for testing...")
+    # Load the full dataset
+    print("Loading the full wikitext dataset...")
     dataset = load_dataset("wikitext", "wikitext-2-raw-v1")
     
     # Filter out empty texts
     dataset = dataset.filter(lambda x: len(x["text"].strip()) > 0)
     
-    # Take a small subset for training and validation
-    train_ds = dataset["train"].select(range(100))  # Small subset for testing
-    val_ds = dataset["validation"].select(range(20))  # Small validation set
+    # Use full training and validation sets
+    train_ds = dataset["train"]
+    val_ds = dataset["validation"]
+    
+    print(f"Training samples: {len(train_ds)}")
+    print(f"Validation samples: {len(val_ds)}")
 
     def tokenize_function(examples):
         # Simple tokenization with padding and truncation
@@ -328,30 +331,31 @@ def main():
     from moe_model import GPT2WithMoE
     model = GPT2WithMoE(cfg)
 
-    # Training arguments with basic checkpointing
+    # Training arguments with full dataset settings
     training_args = TrainingArguments(
         output_dir=args.output_dir,
-        num_train_epochs=args.epochs,
-        per_device_train_batch_size=1,
-        gradient_accumulation_steps=1,
-        learning_rate=1e-5,
+        num_train_epochs=3,  # Train for 3 epochs
+        per_device_train_batch_size=4,  # Increased batch size
+        gradient_accumulation_steps=8,  # Effective batch size of 32
+        learning_rate=6e-5,  # Slightly higher learning rate
         weight_decay=0.01,
         warmup_ratio=0.1,
         # Logging
-        logging_steps=10,  # Log every 10 steps
+        logging_steps=100,  # Log every 100 steps
         logging_first_step=True,
         logging_dir=os.path.join(args.output_dir, 'logs'),
         # Checkpointing
-        save_steps=100,  # Save checkpoint every 100 steps
-        save_total_limit=3,  # Keep only 3 checkpoints
+        save_steps=500,  # Save checkpoint every 500 steps
+        save_total_limit=5,  # Keep more checkpoints
         # Performance
         fp16=True,
-        dataloader_num_workers=0,
-        disable_tqdm=True,  # We use our own progress bar
+        dataloader_num_workers=4,  # Use more workers for faster data loading
+        disable_tqdm=False,  # Show progress bar
         remove_unused_columns=True,
         max_grad_norm=1.0,  # Gradient clipping
         local_rank=-1,
         no_cuda=False,
+        # Evaluation will be handled manually in the training loop
     )
 
     # Use standard data collator for language modeling
