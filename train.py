@@ -298,14 +298,14 @@ def main():
     
     # Tokenization is already handled in load_openassistant_dataset
 
-    # Model configuration - reduced size for 16GB GPU
+    # Model configuration - slightly larger model
     cfg = GPT2Config(
         vocab_size=len(tokenizer),
-        n_positions=256,  # Reduced context length
-        n_embd=768,  # Reduced from 1024
-        n_layer=6,  # Reduced from 12
-        n_head=12,  # Reduced from 16
-        n_inner=3072,  # Reduced from 4096
+        n_positions=512,  # Increased context length
+        n_embd=1024,  # Increased model capacity
+        n_layer=8,  # Increased from 6
+        n_head=16,  # Increased from 12
+        n_inner=4096,  # Increased feed-forward dimension
         activation_function="gelu_new",
         resid_pdrop=0.1,
         embd_pdrop=0.1,
@@ -330,22 +330,22 @@ def main():
     from moe_model import GPT2WithMoE
     model = GPT2WithMoE(cfg)
 
-    # Training arguments with full dataset settings
+    # Training arguments with enhanced settings (compatible with older Transformers)
     training_args = TrainingArguments(
         output_dir=args.output_dir,
-        num_train_epochs=3,  # Train for 3 epochs
-        per_device_train_batch_size=4,  # Increased batch size
+        num_train_epochs=10,  # Increased to 10 epochs
+        per_device_train_batch_size=4,  # Keep batch size the same
         gradient_accumulation_steps=8,  # Effective batch size of 32
-        learning_rate=6e-5,  # Slightly higher learning rate
+        learning_rate=5e-5,  # Initial learning rate
         weight_decay=0.01,
-        warmup_ratio=0.1,
+        warmup_ratio=0.1,  # 10% of training steps for warmup
         # Logging
         logging_steps=100,  # Log every 100 steps
         logging_first_step=True,
         logging_dir=os.path.join(args.output_dir, 'logs'),
         # Checkpointing
-        save_steps=500,  # Save checkpoint every 500 steps
-        save_total_limit=5,  # Keep more checkpoints
+        save_steps=1000,  # Save checkpoint every 1000 steps
+        save_total_limit=3,  # Keep last 3 checkpoints
         # Performance
         fp16=True,
         dataloader_num_workers=4,  # Use more workers for faster data loading
@@ -353,8 +353,7 @@ def main():
         remove_unused_columns=True,
         max_grad_norm=1.0,  # Gradient clipping
         local_rank=-1,
-        no_cuda=False,
-        # Evaluation will be handled manually in the training loop
+        no_cuda=False
     )
 
     # Use standard data collator for language modeling
