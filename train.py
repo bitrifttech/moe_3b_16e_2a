@@ -269,10 +269,118 @@ def load_openassistant_dataset(tok, max_len=256):
     
     return train_ds, val_ds
 
+def load_pile_dataset(tokenizer, max_len=256, max_samples=100000):
+    """Load and preprocess a subset of The Pile dataset."""
+    from datasets import load_dataset, concatenate_datasets
+    
+    print("Loading The Pile dataset from HuggingFace...")
+    
+    # Load a subset of The Pile
+    datasets = []
+    subsets = ["enron_emails", "pubmed"]  # Using smaller subsets that fit in ~1GB
+    
+    for subset in subsets:
+        try:
+            print(f"Loading {subset} subset...")
+            ds = load_dataset("EleutherAI/pile", subset, split=f"train[:{max_samples//len(subsets)}]")
+            datasets.append(ds)
+        except Exception as e:
+            print(f"Error loading {subset}: {str(e)}")
+    
+    if not datasets:
+        raise ValueError("Failed to load any Pile subsets")
+        
+    # Combine all subsets
+    combined = concatenate_datasets(datasets)
+    
+    # Filter out very short or long examples
+    combined = combined.filter(lambda x: 50 < len(x["text"].split()) < 1000)
+    
+    # Split into train and validation
+    split = combined.train_test_split(test_size=0.05, seed=42)
+    
+    def tokenize_function(examples):
+        return tokenizer(
+            examples["text"],
+            truncation=True,
+            max_length=max_len,
+            return_overflowing_tokens=True,
+            return_attention_mask=True,
+            padding="max_length"
+        )
+    
+    print("Tokenizing training set...")
+    train_ds = split["train"].map(
+        tokenize_function,
+        batched=True,
+        remove_columns=split["train"].column_names,
+        num_proc=4
+    )
+    
+    print("Tokenizing validation set...")
+    val_ds = split["test"].map(
+        tokenize_function,
+        batched=True,
+        remove_columns=split["test"].column_names,
+        num_proc=4
+    )
+    
+    return train_ds, val_ds
+
+def load_wikipedia_dataset(tokenizer, max_len=256, language="20220301.en", percent=1):
+    """Load and preprocess a slice of the Wikipedia dump.
+    `percent` specifies the percentage slice of the full dump to keep (1 ≈ ~250 MB for English).
+    """
+    from datasets import load_dataset
+
+    slice_str = f"train[:{percent}%]" if percent < 100 else "train"
+    print(f"Loading Wikipedia ({language}) dataset slice {slice_str} …")
+
+    ds = load_dataset("wikipedia", language, split=slice_str)
+
+    # Filter very short articles
+    ds = ds.filter(lambda x: len(x["text"].split()) > 50)
+
+    # Train/val split
+    split = ds.train_test_split(test_size=0.05, seed=42)
+
+    def tokenize_fn(batch):
+        return tokenizer(
+            batch["text"],
+            truncation=True,
+            max_length=max_len,
+            padding="max_length",
+        )
+
+    print("Tokenizing Wikipedia training set…")
+    train_ds = split["train"].map(tokenize_fn, batched=True, remove_columns=split["train"].column_names,
+                                   num_proc=4)
+
+    print("Tokenizing Wikipedia validation set…")
+    val_ds = split["test"].map(tokenize_fn, batched=True, remove_columns=split["test"].column_names,
+                                 num_proc=4)
+
+    return train_ds, val_ds
+
+def combine_datasets(dataset1, dataset2):
+    """Combine two datasets by interleaving their examples."""
+    from datasets import concatenate_datasets
+    
+    combined_train = concatenate_datasets([dataset1[0], dataset2[0]])
+    combined_val = concatenate_datasets([dataset1[1], dataset2[1]])
+    
+    # Shuffle the combined datasets
+    combined_train = combined_train.shuffle(seed=42)
+    combined_val = combined_val.shuffle(seed=42)
+    
+    return combined_train, combined_val
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output_dir", type=str, default="outputs")
     parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument("--use_pile", action="store_true", help="Use The Pile dataset in addition to OpenAssistant")
+    parser.add_argument("--use_wiki", action="store_true", help="Use Wikipedia dataset in addition to OpenAssistant")
     args = parser.parse_args()
 
     # Set up logging
@@ -289,15 +397,33 @@ def main():
 
     # Load OpenAssistant dataset
     print("Loading OpenAssistant OASST1 dataset...")
-    train_ds, val_ds = load_openassistant_dataset(
-        tokenizer,
-        max_len=256
-    )
+    oa_train_ds, oa_val_ds = load_openassistant_dataset(tokenizer, max_len=256)
+    
+    # Optionally add Wikipedia first (so we can still combine with pile too)
+    if args.use_wiki:
+        print("Loading Wikipedia dataset…")
+        wiki_train_ds, wiki_val_ds = load_wikipedia_dataset(tokenizer, max_len=256, percent=1)
+        oa_train_ds, oa_val_ds = combine_datasets((oa_train_ds, oa_val_ds), (wiki_train_ds, wiki_val_ds))
+
+    if args.use_pile:
+        print("Loading The Pile dataset...")
+        pile_train_ds, pile_val_ds = load_pile_dataset(tokenizer, max_len=256)
+        
+        print("Combining datasets...")
+        train_ds, val_ds = combine_datasets(
+            (oa_train_ds, oa_val_ds),
+            (pile_train_ds, pile_val_ds)
+        )
+        
+        print(f"Combined dataset sizes - Train: {len(train_ds)}, Val: {len(val_ds)}")
+    else:
+        train_ds, val_ds = oa_train_ds, oa_val_ds
     
     print(f"Training samples: {len(train_ds)}")
     print(f"Validation samples: {len(val_ds)}")
+    print(f"Using {'OpenAssistant + The Pile' if args.use_pile else 'OpenAssistant'} dataset")
     
-    # Tokenization is already handled in load_openassistant_dataset
+    # Tokenization is already handled in the dataset loading functions
 
     # Model configuration - slightly larger model
     cfg = GPT2Config(
