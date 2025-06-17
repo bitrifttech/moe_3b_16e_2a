@@ -228,6 +228,43 @@ class CheckpointInfoCallback(TrainerCallback):
         with open(info_path, 'w') as f:
             f.write(md)
 
+def _get_size_mb(ds):
+    """Roughly estimate dataset size in MB.
+
+    1. Use the `dataset_size` provided in the dataset `info` dict when available.
+    2. If the original `text` column is still present, sum the UTF-8 byte lengths of
+       the examples.
+    3. Otherwise (e.g. after tokenisation where only `input_ids` remain) estimate by
+       counting tokens: `len(input_ids) * 2` bytes (2-byte per token rough guess).
+    """
+    size_bytes = None
+
+    # 1) Try metadata if it exists
+    if hasattr(ds, "info"):
+        size_bytes = getattr(ds.info, "dataset_size", None) or getattr(ds.info, "size_in_bytes", None)
+
+    # 2) Fallback: compute from columns
+    if size_bytes is None:
+        try:
+            if "text" in ds.column_names:
+                # Sum UTF-8 bytes of text
+                size_bytes = sum(len(t.encode("utf-8")) for t in ds["text"])
+            elif "input_ids" in ds.column_names:
+                # Rough estimate: 2 bytes per token (uint16/INT)
+                size_bytes = sum(len(ids) for ids in ds["input_ids"]) * 2
+            else:
+                size_bytes = 0
+        except Exception:
+            size_bytes = 0
+
+    return (size_bytes or 0) / (1024 * 1024)
+
+
+def _print_split_stats(name, train_ds, val_ds):
+    print(f"{name} - Train samples: {len(train_ds)}, Val samples: {len(val_ds)}")
+    print(f"{name} sizes -> Train: {_get_size_mb(train_ds):.1f} MB , Val: {_get_size_mb(val_ds):.1f} MB , Total: {_get_size_mb(train_ds)+_get_size_mb(val_ds):.1f} MB")
+
+
 def seed_all(seed=42):
     random.seed(seed)
     torch.manual_seed(seed)
@@ -267,6 +304,7 @@ def load_openassistant_dataset(tok, max_len=256):
     train_ds = train_ds.filter(lambda x: len(x["input_ids"]) > 1)
     val_ds = val_ds.filter(lambda x: len(x["input_ids"]) > 1)
     
+    _print_split_stats("OpenAssistant", train_ds, val_ds)
     return train_ds, val_ds
 
 def load_pile_dataset(tokenizer, max_len=256, max_samples=100000):
@@ -323,8 +361,9 @@ def load_pile_dataset(tokenizer, max_len=256, max_samples=100000):
         batched=True,
         remove_columns=split["test"].column_names,
         num_proc=4
-    )
-    
+     )
+     
+    _print_split_stats("The Pile", train_ds, val_ds)
     return train_ds, val_ds
 
 def load_wikipedia_dataset(tokenizer, max_len=256, language="20220301.en", percent=1):
@@ -358,8 +397,9 @@ def load_wikipedia_dataset(tokenizer, max_len=256, language="20220301.en", perce
 
     print("Tokenizing Wikipedia validation set…")
     val_ds = split["test"].map(tokenize_fn, batched=True, remove_columns=split["test"].column_names,
-                                 num_proc=4)
-
+                                  num_proc=4)
+ 
+    _print_split_stats("Wikipedia", train_ds, val_ds)
     return train_ds, val_ds
 
 def combine_datasets(dataset1, dataset2):
@@ -402,7 +442,7 @@ def main():
     # Optionally add Wikipedia first (so we can still combine with pile too)
     if args.use_wiki:
         print("Loading Wikipedia dataset…")
-        wiki_train_ds, wiki_val_ds = load_wikipedia_dataset(tokenizer, max_len=256, percent=1)
+        wiki_train_ds, wiki_val_ds = load_wikipedia_dataset(tokenizer, max_len=256, percent=10)
         oa_train_ds, oa_val_ds = combine_datasets((oa_train_ds, oa_val_ds), (wiki_train_ds, wiki_val_ds))
 
     if args.use_pile:
@@ -414,11 +454,10 @@ def main():
             (oa_train_ds, oa_val_ds),
             (pile_train_ds, pile_val_ds)
         )
-        
-        print(f"Combined dataset sizes - Train: {len(train_ds)}, Val: {len(val_ds)}")
     else:
         train_ds, val_ds = oa_train_ds, oa_val_ds
     
+    _print_split_stats("Final Combined", train_ds, val_ds)
     print(f"Training samples: {len(train_ds)}")
     print(f"Validation samples: {len(val_ds)}")
     print(f"Using {'OpenAssistant + The Pile' if args.use_pile else 'OpenAssistant'} dataset")
