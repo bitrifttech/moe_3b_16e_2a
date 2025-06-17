@@ -3,6 +3,7 @@ import torch
 import logging
 import argparse
 import numpy as np
+import glob
 from typing import Optional
 from tqdm import tqdm
 from datasets import load_dataset
@@ -333,7 +334,7 @@ def main():
     # Training arguments with enhanced settings (compatible with older Transformers)
     training_args = TrainingArguments(
         output_dir=args.output_dir,
-        num_train_epochs=10,  # Increased to 10 epochs
+        num_train_epochs=5,  # Increased to 10 epochs
         per_device_train_batch_size=4,  # Keep batch size the same
         gradient_accumulation_steps=8,  # Effective batch size of 32
         learning_rate=5e-5,  # Initial learning rate
@@ -369,6 +370,16 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     os.makedirs(os.path.join(args.output_dir, 'logs'), exist_ok=True)
     
+    # Find the latest checkpoint if it exists
+    latest_checkpoint = None
+    if os.path.isdir(args.output_dir):
+        checkpoints = [d for d in os.listdir(args.output_dir) if d.startswith('checkpoint-')]
+        if checkpoints:
+            # Sort by step number
+            checkpoints = sorted(checkpoints, key=lambda x: int(x.split('-')[-1]))
+            latest_checkpoint = os.path.join(args.output_dir, checkpoints[-1])
+            print(f"Found checkpoint: {latest_checkpoint}")
+
     # Create a custom trainer with safetensors saving
     class CustomTrainer(Trainer):
         def _save(self, output_dir: Optional[str] = None, state_dict=None):
@@ -415,17 +426,29 @@ def main():
             # Fall back to default loading
             return super()._load_from_checkpoint(resume_from_checkpoint, model)
     
-    # Initialize trainer with custom saving
+    # Load model weights from checkpoint if exists
+    if latest_checkpoint and os.path.isdir(latest_checkpoint):
+        print(f"Loading model weights from {latest_checkpoint}")
+        # Load the model state dict directly
+        model_path = os.path.join(latest_checkpoint, 'pytorch_model.bin')
+        if os.path.exists(model_path):
+            state_dict = torch.load(model_path, map_location='cpu')
+            model.load_state_dict(state_dict, strict=False)
+            print("Model weights loaded successfully")
+        else:
+            print(f"Warning: Model weights not found at {model_path}")
+    
+    # Initialize trainer
     trainer = CustomTrainer(
         model=model,
         args=training_args,
         train_dataset=train_ds,
         eval_dataset=val_ds,
         data_collator=data_collator,
-        callbacks=[progress_callback],
+        callbacks=[progress_callback, CheckpointInfoCallback()],
     )
-
-    # Train the model
+    
+    # Start fresh training (with loaded weights)
     trainer.train()
 
 if __name__ == "__main__":
