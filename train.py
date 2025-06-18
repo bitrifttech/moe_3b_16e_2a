@@ -20,6 +20,7 @@ from transformers import TrainerCallback, TrainingArguments, TrainerState, Train
 import json
 from datetime import datetime
 import pathlib
+from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 
 # Insert a constant MODEL_SCALE (0.8) after the imports so that model size is reduced by 20%
 MODEL_SCALE = 1.0
@@ -228,6 +229,91 @@ class CheckpointInfoCallback(TrainerCallback):
         with open(info_path, 'w') as f:
             f.write(md)
 
+class LrKickOnceCallback(TrainerCallback):
+    """Multiply learning rate by a factor once at a specific step to break plateaus."""
+    def __init__(self, factor=3.0, at_step=0):
+        self.factor = factor
+        self.at_step = at_step
+        self.done = False
+
+    def on_step_end(self, args, state, control, **kwargs):
+        if not self.done and state.global_step >= self.at_step:
+            opt = kwargs.get("optimizer")
+            sched = kwargs.get("lr_scheduler") 
+            if opt and sched:
+                # Boost current LR
+                for g in opt.param_groups:
+                    g["lr"] *= self.factor
+                # Update scheduler base LRs so it doesn't reset
+                if hasattr(sched, 'base_lrs'):
+                    sched.base_lrs = [lr * self.factor for lr in sched.base_lrs]
+                logger.info(f"🚀 LR kicked by ×{self.factor} at step {state.global_step}")
+                self.done = True
+
+class MoERoutingCallback(TrainerCallback):
+    """Log MoE expert utilization statistics."""
+    def __init__(self, log_every=500):
+        self.log_every = log_every
+        
+    def on_step_end(self, args, state, control, **kwargs):
+        if state.global_step % self.log_every == 0:
+            logger.info(f"🔍 MoE Debug @ Step {state.global_step}: Callback triggered")
+            model = kwargs.get("model")
+            if model and hasattr(model, 'transformer'):
+                self._log_routing_stats(model, state.global_step)
+    
+    def _log_routing_stats(self, model, step):
+        """Extract and log expert routing statistics."""
+        try:
+            expert_counts = []
+            total_tokens = 0
+            aux_losses = []
+            
+            if hasattr(model, 'transformer') and hasattr(model.transformer, 'h'):
+                # Check each MoE block
+                for idx, block in enumerate(model.transformer.h):
+                    if hasattr(block, 'mlp') and hasattr(block.mlp, 'moe'):
+                        moe_layer = block.mlp.moe
+                        
+                        # Get routing statistics from Tutel MOELayer
+                        if hasattr(moe_layer, 'dispatch_count') and moe_layer.dispatch_count is not None:
+                            counts = moe_layer.dispatch_count.cpu().numpy()
+                            expert_counts.append(counts)
+                            total_tokens += counts.sum()
+                        
+                        # Get auxiliary loss (load balancing)
+                        if hasattr(moe_layer, 'l_aux') and moe_layer.l_aux is not None:
+                            aux_loss_val = moe_layer.l_aux if isinstance(moe_layer.l_aux, float) else moe_layer.l_aux.item()
+                            aux_losses.append(aux_loss_val)
+            
+            if expert_counts:
+                # Calculate utilization stats
+                all_counts = torch.cat([torch.tensor(c, dtype=torch.float32) for c in expert_counts])
+                total_routed = all_counts.sum().item()
+                expert_util = (all_counts > 0).float().mean().item() * 100  # % of experts used
+                load_balance = all_counts.std().item() / (all_counts.mean().item() + 1e-8)  # CV
+                
+                # Calculate per-layer stats
+                layer_stats = []
+                for i, counts in enumerate(expert_counts):
+                    layer_util = (counts > 0).sum() / len(counts) * 100
+                    layer_cv = counts.std() / (counts.mean() + 1e-8)
+                    max_load = counts.max()
+                    layer_stats.append(f"L{i*2}:{layer_util:.0f}%/{layer_cv:.2f}/{max_load}")
+                
+                avg_aux_loss = sum(aux_losses) / len(aux_losses) if aux_losses else 0
+                
+                logger.info(f"🧠 MoE Routing @ Step {step}: "
+                          f"Overall Util: {expert_util:.1f}%, CV: {load_balance:.3f}, "
+                          f"Aux Loss: {avg_aux_loss:.3f}, Total: {total_routed}")
+                logger.info(f"📊 Per-Layer [Util%/CV/MaxLoad]: {' | '.join(layer_stats)}")
+            else:
+                logger.info(f"🔍 MoE Debug: No expert counts found - expert_counts is empty")
+        except Exception as e:
+            logger.error(f"MoE routing stats failed: {e}")
+            import traceback
+            logger.error(f"Full traceback: {traceback.format_exc()}")
+            
 def _get_size_mb(ds):
     """Roughly estimate dataset size in MB.
 
@@ -270,6 +356,7 @@ def seed_all(seed=42):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
+
 def load_openassistant_dataset(tok, max_len=256):
     """Load and preprocess the OpenAssistant OASST1 dataset."""
     from datasets import load_dataset, DatasetDict, concatenate_datasets
@@ -306,6 +393,7 @@ def load_openassistant_dataset(tok, max_len=256):
     
     _print_split_stats("OpenAssistant", train_ds, val_ds)
     return train_ds, val_ds
+
 
 def load_pile_dataset(tokenizer, max_len=256, max_samples=100000):
     """Load and preprocess a subset of The Pile dataset."""
@@ -366,6 +454,7 @@ def load_pile_dataset(tokenizer, max_len=256, max_samples=100000):
     _print_split_stats("The Pile", train_ds, val_ds)
     return train_ds, val_ds
 
+
 def load_wikipedia_dataset(tokenizer, max_len=256, language="20220301.en", percent=1):
     """Load and preprocess a slice of the Wikipedia dump.
     `percent` specifies the percentage slice of the full dump to keep (1 ≈ ~250 MB for English).
@@ -402,6 +491,7 @@ def load_wikipedia_dataset(tokenizer, max_len=256, language="20220301.en", perce
     _print_split_stats("Wikipedia", train_ds, val_ds)
     return train_ds, val_ds
 
+
 def combine_datasets(dataset1, dataset2):
     """Combine two datasets by interleaving their examples."""
     from datasets import concatenate_datasets
@@ -414,6 +504,7 @@ def combine_datasets(dataset1, dataset2):
     combined_val = combined_val.shuffle(seed=42)
     
     return combined_train, combined_val
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -530,6 +621,8 @@ def main():
 
     # Initialize callbacks
     progress_callback = ProgressCallback()
+    # lr_kick_callback = LrKickOnceCallback(factor=3.0, at_step=0)  # Disabled - already helped break plateau
+    moe_routing_callback = MoERoutingCallback(log_every=5)
     
     # Create output directory if it doesn't exist
     os.makedirs(args.output_dir, exist_ok=True)
@@ -547,6 +640,52 @@ def main():
 
     # Create a custom trainer with safetensors saving
     class CustomTrainer(Trainer):
+        def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+            """
+            Compute loss including MoE auxiliary loss for load balancing.
+            """
+            labels = inputs.get("labels")
+            # Forward pass
+            outputs = model(**inputs)
+            
+            # Get the main language modeling loss
+            if labels is not None:
+                # Shift so that tokens < n predict n
+                shift_logits = outputs.logits[..., :-1, :].contiguous()
+                shift_labels = labels[..., 1:].contiguous()
+                loss_fct = torch.nn.CrossEntropyLoss()
+                lm_loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+            else:
+                lm_loss = outputs.loss
+            
+            # Collect auxiliary losses from all MoE layers
+            aux_loss = 0.0
+            aux_loss_weight = 0.05  # Increased from 0.01 to 0.05 for stronger load balancing
+            
+            if hasattr(model, 'transformer') and hasattr(model.transformer, 'h'):
+                for block in model.transformer.h:
+                    if hasattr(block, 'mlp') and hasattr(block.mlp, 'moe'):
+                        moe_layer = block.mlp.moe
+                        if hasattr(moe_layer, 'l_aux') and moe_layer.l_aux is not None:
+                            if isinstance(moe_layer.l_aux, torch.Tensor):
+                                aux_loss += moe_layer.l_aux
+                            else:
+                                aux_loss += float(moe_layer.l_aux)
+            
+            # Total loss = language modeling loss + weighted auxiliary loss
+            total_loss = lm_loss + aux_loss_weight * aux_loss
+            
+            # Log the loss components occasionally
+            if hasattr(self, '_loss_log_counter'):
+                self._loss_log_counter += 1
+            else:
+                self._loss_log_counter = 1
+                
+            if self._loss_log_counter % 100 == 0:  # Log every 100 steps
+                logger.info(f"Loss breakdown: LM={lm_loss:.4f}, Aux={aux_loss:.4f}, Total={total_loss:.4f}")
+            
+            return (total_loss, outputs) if return_outputs else total_loss
+        
         def _save(self, output_dir: Optional[str] = None, state_dict=None):
             output_dir = output_dir if output_dir is not None else self.args.output_dir
             os.makedirs(output_dir, exist_ok=True)
@@ -590,6 +729,25 @@ def main():
                 
             # Fall back to default loading
             return super()._load_from_checkpoint(resume_from_checkpoint, model)
+
+        def create_scheduler(self, num_training_steps: int, optimizer: torch.optim.Optimizer = None):
+            """Create a CosineAnnealingWarmRestarts LR scheduler.
+
+            The first restart happens after ~20 % of the total remaining steps (T_0) and
+            each subsequent cycle is twice as long (T_mult=2). This gives smooth
+            decay punctuated by periodic warm restarts which can help escape loss
+            plateaus without manual intervention.
+            """
+            if self.lr_scheduler is None:
+                optimizer = optimizer or self.optimizer
+                t0 = max(1, num_training_steps // 5)
+                logger.info(f"Building Cosine LR scheduler: T0={t0}, T_mult=2, steps={num_training_steps}")
+                self.lr_scheduler = CosineAnnealingWarmRestarts(
+                    optimizer,
+                    T_0=t0,
+                    T_mult=2,
+                )
+            return self.lr_scheduler
     
     # Load model weights from checkpoint if exists
     if latest_checkpoint and os.path.isdir(latest_checkpoint):
@@ -610,7 +768,7 @@ def main():
         train_dataset=train_ds,
         eval_dataset=val_ds,
         data_collator=data_collator,
-        callbacks=[progress_callback, CheckpointInfoCallback()],
+        callbacks=[progress_callback, moe_routing_callback, CheckpointInfoCallback()],
     )
     
     # Start fresh training (with loaded weights)

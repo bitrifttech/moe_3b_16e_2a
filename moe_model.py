@@ -24,21 +24,51 @@ class MoEBlock(nn.Module):
             'activation_fn': lambda x: torch.nn.functional.gelu(x),  # Use callable activation
         }
         
-        # Initialize MoE layer with simplified configuration
+        # Initialize MoE layer with load balancing configuration
         self.moe = tutel_moe.moe_layer(
-            gate_type={'type': 'top', 'k': self.k},
+            gate_type={
+                'type': 'top', 
+                'k': self.k,
+                'fp32_gate': True,  # Use FP32 for gate computation for stability
+                'gate_noise': 1e-2,  # Add noise to gate for better exploration
+            },
             model_dim=self.d_model,
             experts=expert_config,
             scan_expert_func=lambda name, param: setattr(param, 'skip_allreduce', True),
             seeds=(1, 1),
-            batch_prioritized_routing=True
+            batch_prioritized_routing=True,
+            # Load balancing parameters that work with this Tutel version
+            is_gshard_loss=True,  # Use GShard-style load balancing loss
         )
         
         # Store expert parameters for initialization
         self.experts = self.moe.experts
 
     def forward(self, x):
-        return self.moe(x)
+        # Store input shape for diagnostics
+        batch_size, seq_len, d_model = x.shape
+        
+        # Forward through MoE
+        output = self.moe(x)
+        
+        # Periodically log routing info (every 1000 forward passes)
+        if not hasattr(self, '_forward_count'):
+            self._forward_count = 0
+        self._forward_count += 1
+        
+        if self._forward_count % 1000 == 0:
+            try:
+                # Try to extract routing info from Tutel's gate
+                if hasattr(self.moe, 'gate') and hasattr(self.moe.gate, 'wg'):
+                    gate_logits = self.moe.gate.wg.weight.data
+                    # Simple check: are gate weights diverse?
+                    gate_std = gate_logits.std().item()
+                    gate_mean = gate_logits.mean().item()
+                    print(f"MoE Gate Stats: mean={gate_mean:.4f}, std={gate_std:.4f}, tokens={batch_size*seq_len}")
+            except:
+                pass  # Ignore errors in diagnostics
+        
+        return output
         
     def init_from_mlp(self, mlp):
         """Initialize MoE experts from a standard MLP layer"""
