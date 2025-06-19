@@ -23,6 +23,7 @@ class AlpacaLoader(BaseDatasetLoader):
     
     def load_raw_data(self) -> Any:
         """Load Alpaca dataset from HuggingFace."""
+        from datasets import load_dataset
         try:
             # Try the main Alpaca dataset
             dataset = load_dataset("tatsu-lab/alpaca")

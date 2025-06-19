@@ -656,7 +656,8 @@ def load_datasets_with_loader(tokenizer, args):
         if args.use_wiki:
             wiki_loader = create_wikipedia_loader(
                 max_samples=args.max_samples // 3,
-                max_length=args.max_length
+                max_length=args.max_length,
+                percent_to_load=5
             )
             wiki_train, wiki_val, _ = wiki_loader.load_and_process()
             datasets.append(("wikipedia", wiki_train, wiki_val))
@@ -810,7 +811,7 @@ def main():
         # Optionally add Wikipedia
         if args.use_wiki:
             print("Loading Wikipedia dataset...")
-            wiki_train_ds, wiki_val_ds = load_wikipedia_dataset(tokenizer, max_len=args.max_length, percent=10)
+            wiki_train_ds, wiki_val_ds = load_wikipedia_dataset(tokenizer, max_len=args.max_length, percent=5)
             oa_train_ds, oa_val_ds = combine_datasets((oa_train_ds, oa_val_ds), (wiki_train_ds, wiki_val_ds))
 
         if args.use_pile:

@@ -36,7 +36,7 @@ class ShareGPTLoader(BaseDatasetLoader):
                 return dataset["train"]
             except Exception as e2:
                 self.logger.error(f"All ShareGPT sources failed: {e2}")
-                raise e
+                return []
     
     def preprocess(self, raw_data: Any) -> List[Dict[str, str]]:
         """

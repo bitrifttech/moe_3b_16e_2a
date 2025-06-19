@@ -27,8 +27,8 @@ class WikipediaLoader(BaseDatasetLoader):
         """Load Wikipedia dataset from HuggingFace."""
         try:
             # Load a 1% slice of the dataset for the specified language and date
-            dataset = hf_load_dataset("wikipedia", f"{self.date}.{self.language}")
-            return dataset["train"]
+            dataset = hf_load_dataset("wikipedia", f"{self.date}.{self.language}", split=f"train[:{self.percent_to_load}%]")
+            return dataset
         except Exception as e:
             self.logger.error(f"Failed to load Wikipedia dataset: {e}")
             raise
@@ -108,7 +108,8 @@ def create_wikipedia_loader(
     language: str = "en", 
     date: str = "20220301",
     max_samples: int = 50000, 
-    max_length: int = 600
+    max_length: int = 600,
+    percent_to_load: int = 1
 ) -> WikipediaLoader:
     """Factory function to create Wikipedia loader with custom config."""
     config = DatasetConfig(
@@ -117,4 +118,6 @@ def create_wikipedia_loader(
         max_length=max_length,
         min_length=100
     )
-    return WikipediaLoader(config, language, date)
+    loader = WikipediaLoader(config, language, date)
+    loader.percent_to_load = percent_to_load
+    return loader
