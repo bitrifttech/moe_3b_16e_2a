@@ -136,13 +136,9 @@ class GPT2WithMoE(GPT2PreTrainedModel, GenerationMixin):
         hidden_states = transformer_outputs.last_hidden_state
         logits = self.lm_head(hidden_states)
         
+        # Don't compute loss here - let CustomTrainer.compute_loss handle it
+        # This ensures MoE auxiliary loss is properly included
         loss = None
-        if labels is not None:
-            # Shift so that tokens < n predict n
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-            loss_fct = nn.CrossEntropyLoss()
-            loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
         
         # Return a CausalLMOutputWithCrossAttentions object
         from transformers.modeling_outputs import CausalLMOutputWithCrossAttentions

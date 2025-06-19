@@ -2,6 +2,7 @@ import os
 import torch
 import logging
 import argparse
+import time
 import numpy as np
 import glob
 from typing import Optional
@@ -47,95 +48,69 @@ logging.getLogger().addFilter(_SuppressCapacityLogs())
 logger = logging.getLogger(__name__)
 
 class ProgressCallback(TrainerCallback):
-    def __init__(self):
-        self.pbar = None
-        self.total_steps = None
+    def __init__(self, total_steps):
+        super().__init__()
+        self.total_steps = total_steps
         self.current_step = 0
-        self.start_time = None
-        self.last_log_time = 0
-        self.log_interval = 10  # Log every 10 steps
-
-    def format_time(self, seconds):
-        """Format seconds to HH:MM:SS"""
-        if seconds <= 0:
-            return "--:--:--"
-        m, s = divmod(int(seconds), 60)
-        h, m = divmod(m, 60)
-        return f"{h:02d}:{m:02d}:{s:02d}"
+        self.pbar = None
+        self.last_custom_loss = None  # Store our custom loss value
 
     def on_train_begin(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
-        import time
-        self.total_steps = state.max_steps
-        self.start_time = time.time()
-        self.last_log_time = self.start_time
-        
-        # Initialize progress bar with more detailed format
-        self.pbar = tqdm(
-            total=self.total_steps,
-            desc="[Training]",
-            dynamic_ncols=True,
-            bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]'
-        )
-        
+        self.pbar = tqdm(total=self.total_steps, desc="[Training]", unit="step", dynamic_ncols=True)
         logger.info(f"🚀 Starting training for {self.total_steps} steps")
-        if args.local_rank in [-1, 0]:
-            logger.info(f"  Batch size per device = {args.per_device_train_batch_size}")
-            logger.info(f"  Total train batch size = {args.per_device_train_batch_size * args.world_size}")
-            logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
+        logger.info(f"  Batch size per device = {args.per_device_train_batch_size}")
+        logger.info(f"  Total train batch size = {args.per_device_train_batch_size * args.world_size}")
+        logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
 
     def on_step_end(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
-        import time
-        current_time = time.time()
         self.current_step = state.global_step
         
-        # Calculate metrics
-        elapsed = current_time - self.start_time
-        steps_done = self.current_step
-        steps_left = self.total_steps - steps_done
-        
-        # Calculate ETA
-        steps_per_sec = steps_done / elapsed if elapsed > 0 else 0
-        eta = steps_left / steps_per_sec if steps_per_sec > 0 else 0
-        
+        # Get the custom loss from the trainer if available
+        trainer = kwargs.get('trainer')
+        if trainer and hasattr(trainer, '_loss_log_counter') and hasattr(trainer, '_last_total_loss'):
+            loss_to_display = trainer._last_total_loss
+        elif state.log_history and len(state.log_history) > 0:
+            last_log = state.log_history[-1]
+            loss_to_display = last_log.get('loss', 'N/A')
+        else:
+            loss_to_display = 'N/A'
+            
         # Update progress bar
-        self.pbar.update(1)
-        self.pbar.set_postfix({
-            'loss': f"{state.log_history[-1].get('loss', 0):.4f}" if state.log_history else 'N/A',
-            'lr': f"{state.log_history[-1].get('learning_rate', 0):.2e}" if state.log_history else 'N/A',
-            'ETA': self.format_time(eta)
-        })
-        
-        # Log detailed progress periodically
-        if (current_time - self.last_log_time > 30 or  # Every 30 seconds
-            steps_done % 100 == 0 or 
-            steps_done == self.total_steps):
+        if self.pbar:
+            lr = state.log_history[-1].get('learning_rate', 0) if state.log_history else 0
+            remaining_steps = self.total_steps - self.current_step
+            eta_seconds = remaining_steps * (self.pbar.format_dict.get('elapsed', 0) / max(self.current_step, 1))
+            eta_str = f"{int(eta_seconds//3600):02d}:{int((eta_seconds%3600)//60):02d}:{int(eta_seconds%60):02d}"
             
-            progress_pct = (steps_done / self.total_steps) * 100
-            elapsed_str = self.format_time(elapsed)
-            eta_str = self.format_time(eta)
-            
-            logger.info(
-                f"📊 Step {steps_done}/{self.total_steps} "
-                f"({progress_pct:.1f}%) | "
-                f"Loss: {state.log_history[-1].get('loss', 0):.4f} | "
-                f"LR: {state.log_history[-1].get('learning_rate', 0):.2e} | "
-                f"Elapsed: {elapsed_str} | "
-                f"ETA: {eta_str}"
-            )
-            self.last_log_time = current_time
-            
-        # Final log at the end of training
-        if steps_done == self.total_steps:
-            total_time = self.format_time(elapsed)
-            logger.info(f"\n✨ Training completed in {total_time} ✨")
+            self.pbar.set_postfix({
+                'loss': f'{loss_to_display:.4f}' if isinstance(loss_to_display, (int, float)) else str(loss_to_display),
+                'lr': f'{lr:.2e}',
+                'ETA': eta_str
+            })
+            self.pbar.update(1)
+
+        # Calculate and display ETA
+        if self.current_step > 0:
+            elapsed_time = time.time() - (state.log_history[0].get('timestamp', time.time()) if state.log_history else time.time())
+            avg_time_per_step = elapsed_time / self.current_step
+            remaining_steps = self.total_steps - self.current_step
+            eta_seconds = remaining_steps * avg_time_per_step
+            eta_str = f"{int(eta_seconds//3600):02d}:{int((eta_seconds%3600)//60):02d}:{int(eta_seconds%60):02d}"
+        else:
+            eta_str = "calculating..."
+
+        if self.current_step == self.total_steps:
+            total_time = time.time() - (state.log_history[0].get('timestamp', time.time()) if state.log_history else time.time())
+            total_time_str = f"{int(total_time//3600):02d}:{int((total_time%3600)//60):02d}:{int(total_time%60):02d}"
+            logger.info(f"\n✨ Training completed in {total_time_str} ✨")
             self.pbar.close()
             logger.info(f"Step {self.current_step}/{self.total_steps} - ETA: {eta_str}")
-        if state.log_history and len(state.log_history) > 0:
-            last_log = state.log_history[-1]
-            if 'loss' in last_log:
-                logger.info(f"Step {self.current_step}/{self.total_steps} - Loss: {last_log['loss']}")
-            if 'eval_loss' in last_log:
-                logger.info(f"Step {self.current_step}/{self.total_steps} - Eval Loss: {last_log['eval_loss']}")
+        
+        # Log the correct loss value
+        if isinstance(loss_to_display, (int, float)):
+            logger.info(f"Step {self.current_step}/{self.total_steps} - Loss: {loss_to_display:.4f}")
+        else:
+            logger.info(f"Step {self.current_step}/{self.total_steps} - Loss: {loss_to_display}")
 
     def on_evaluate(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, metrics=None, **kwargs):
         if metrics:
@@ -492,6 +467,133 @@ def load_wikipedia_dataset(tokenizer, max_len=256, language="20220301.en", perce
     return train_ds, val_ds
 
 
+def load_conversational_dataset(tokenizer, max_len=256, max_samples=50000):
+    """
+    Load and preprocess the Anthropic HH-RLHF dataset for conversational training.
+    This dataset contains high-quality human-AI conversations that will improve
+    the model's conversational abilities.
+    """
+    from datasets import load_dataset
+    
+    print("Loading Anthropic HH-RLHF conversational dataset...")
+    
+    # Load the helpful subset of the HH-RLHF dataset
+    try:
+        print(f"Loading helpful-base subset...")
+        ds = load_dataset("Anthropic/hh-rlhf", data_dir="helpful-base")
+        ds = ds["train"]  # Use training split
+        
+        # Take a subset if specified
+        if max_samples and len(ds) > max_samples:
+            ds = ds.select(range(max_samples))
+            
+        print(f"Loaded {len(ds)} conversational examples")
+        
+        def format_conversation(example):
+            """Format the conversation into a single text string"""
+            chosen = example["chosen"]
+            # Clean up the conversation format
+            text = chosen.strip()
+            # Ensure it ends with an EOS token
+            if not text.endswith(tokenizer.eos_token):
+                text += tokenizer.eos_token
+            return {"text": text}
+        
+        # Format conversations
+        ds = ds.map(format_conversation, remove_columns=ds.column_names)
+        
+        # Filter out very short or very long conversations
+        ds = ds.filter(lambda x: 50 <= len(x["text"].split()) <= 400)
+        
+        print(f"After filtering: {len(ds)} conversational examples")
+        
+        # Split into train/validation
+        split = ds.train_test_split(test_size=0.05, seed=42)
+        
+        def tokenize_fn(examples):
+            return tokenizer(
+                examples["text"],
+                truncation=True,
+                padding=False,
+                max_length=max_len,
+                return_tensors=None
+            )
+        
+        # Tokenize
+        train_ds = split["train"].map(
+            tokenize_fn, 
+            batched=True, 
+            remove_columns=split["train"].column_names,
+            num_proc=4
+        )
+        val_ds = split["test"].map(
+            tokenize_fn, 
+            batched=True, 
+            remove_columns=split["test"].column_names,
+            num_proc=4
+        )
+        
+        print(f"Conversational dataset - Train: {len(train_ds)}, Val: {len(val_ds)}")
+        return train_ds, val_ds
+        
+    except Exception as e:
+        print(f"Failed to load Anthropic HH-RLHF dataset: {e}")
+        print("Falling back to alternative conversational dataset...")
+        
+        # Fallback to a simpler conversational dataset
+        try:
+            # Use a subset of the original OpenAssistant but format differently for conversations
+            ds = load_dataset("OpenAssistant/oasst1")
+            from datasets import concatenate_datasets, DatasetDict
+            if isinstance(ds, DatasetDict):
+                ds = concatenate_datasets([ds[k] for k in ds.keys()])
+            
+            # Filter for English conversations (both human and assistant)
+            ds = ds.filter(lambda x: x["lang"] == "en" and len(x["text"].split()) > 20)
+            
+            if max_samples and len(ds) > max_samples:
+                ds = ds.select(range(max_samples))
+            
+            def format_oasst_conversation(example):
+                text = example["text"].strip()
+                if not text.endswith(tokenizer.eos_token):
+                    text += tokenizer.eos_token
+                return {"text": text}
+            
+            ds = ds.map(format_oasst_conversation, remove_columns=ds.column_names)
+            split = ds.train_test_split(test_size=0.05, seed=42)
+            
+            def tokenize_fn(examples):
+                return tokenizer(
+                    examples["text"],
+                    truncation=True,
+                    padding=False,
+                    max_length=max_len,
+                    return_tensors=None
+                )
+            
+            train_ds = split["train"].map(
+                tokenize_fn, 
+                batched=True, 
+                remove_columns=split["train"].column_names,
+                num_proc=4
+            )
+            val_ds = split["test"].map(
+                tokenize_fn, 
+                batched=True, 
+                remove_columns=split["test"].column_names,
+                num_proc=4
+            )
+            
+            print(f"Fallback conversational dataset - Train: {len(train_ds)}, Val: {len(val_ds)}")
+            return train_ds, val_ds
+            
+        except Exception as e2:
+            print(f"Fallback also failed: {e2}")
+            print("No conversational dataset loaded")
+            return None, None
+
+
 def combine_datasets(dataset1, dataset2):
     """Combine two datasets by interleaving their examples."""
     from datasets import concatenate_datasets
@@ -512,6 +614,8 @@ def main():
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--use_pile", action="store_true", help="Use The Pile dataset in addition to OpenAssistant")
     parser.add_argument("--use_wiki", action="store_true", help="Use Wikipedia dataset in addition to OpenAssistant")
+    parser.add_argument("--use_conversation", action="store_true", help="Use conversational dataset (HH-RLHF) to improve chat abilities")
+    parser.add_argument("--ignore_checkpoint", action="store_true", help="Ignore existing checkpoints and start training from step 1")
     args = parser.parse_args()
 
     # Set up logging
@@ -530,7 +634,17 @@ def main():
     print("Loading OpenAssistant OASST1 dataset...")
     oa_train_ds, oa_val_ds = load_openassistant_dataset(tokenizer, max_len=256)
     
-    # Optionally add Wikipedia first (so we can still combine with pile too)
+    # Optionally add conversational dataset first
+    if args.use_conversation:
+        print("Loading conversational dataset for improved chat abilities...")
+        conv_train_ds, conv_val_ds = load_conversational_dataset(tokenizer, max_len=256, max_samples=30000)
+        if conv_train_ds is not None and conv_val_ds is not None:
+            oa_train_ds, oa_val_ds = combine_datasets((oa_train_ds, oa_val_ds), (conv_train_ds, conv_val_ds))
+            print("Successfully integrated conversational dataset!")
+        else:
+            print("Failed to load conversational dataset, continuing with existing datasets...")
+    
+    # Optionally add Wikipedia (so we can still combine with pile too)
     if args.use_wiki:
         print("Loading Wikipedia dataset…")
         wiki_train_ds, wiki_val_ds = load_wikipedia_dataset(tokenizer, max_len=256, percent=10)
@@ -551,7 +665,18 @@ def main():
     _print_split_stats("Final Combined", train_ds, val_ds)
     print(f"Training samples: {len(train_ds)}")
     print(f"Validation samples: {len(val_ds)}")
-    print(f"Using {'OpenAssistant + The Pile' if args.use_pile else 'OpenAssistant'} dataset")
+    
+    # Build dataset description
+    dataset_parts = ["OpenAssistant"]
+    if args.use_conversation:
+        dataset_parts.append("Conversational (HH-RLHF)")
+    if args.use_wiki:
+        dataset_parts.append("Wikipedia")
+    if args.use_pile:
+        dataset_parts.append("The Pile")
+    
+    dataset_description = " + ".join(dataset_parts)
+    print(f"Using {dataset_description} dataset")
     
     # Tokenization is already handled in the dataset loading functions
 
@@ -587,57 +712,6 @@ def main():
     from moe_model import GPT2WithMoE
     model = GPT2WithMoE(cfg)
 
-    # Training arguments with enhanced settings (compatible with older Transformers)
-    training_args = TrainingArguments(
-        output_dir=args.output_dir,
-        num_train_epochs=5,  # Increased to 10 epochs
-        per_device_train_batch_size=4,  # Keep batch size the same
-        gradient_accumulation_steps=8,  # Effective batch size of 32
-        learning_rate=5e-5,  # Initial learning rate
-        weight_decay=0.01,
-        warmup_ratio=0.1,  # 10% of training steps for warmup
-        # Logging
-        logging_steps=100,  # Log every 100 steps
-        logging_first_step=True,
-        logging_dir=os.path.join(args.output_dir, 'logs'),
-        # Checkpointing
-        save_steps=1000,  # Save checkpoint every 1000 steps
-        save_total_limit=3,  # Keep last 3 checkpoints
-        # Performance
-        fp16=True,
-        dataloader_num_workers=4,  # Use more workers for faster data loading
-        disable_tqdm=False,  # Show progress bar
-        remove_unused_columns=True,
-        max_grad_norm=1.0,  # Gradient clipping
-        local_rank=-1,
-        no_cuda=False
-    )
-
-    # Use standard data collator for language modeling
-    data_collator = DataCollatorForLanguageModeling(
-        tokenizer=tokenizer,
-        mlm=False,  # No masked language modeling
-    )
-
-    # Initialize callbacks
-    progress_callback = ProgressCallback()
-    # lr_kick_callback = LrKickOnceCallback(factor=3.0, at_step=0)  # Disabled - already helped break plateau
-    moe_routing_callback = MoERoutingCallback(log_every=5)
-    
-    # Create output directory if it doesn't exist
-    os.makedirs(args.output_dir, exist_ok=True)
-    os.makedirs(os.path.join(args.output_dir, 'logs'), exist_ok=True)
-    
-    # Find the latest checkpoint if it exists
-    latest_checkpoint = None
-    if os.path.isdir(args.output_dir):
-        checkpoints = [d for d in os.listdir(args.output_dir) if d.startswith('checkpoint-')]
-        if checkpoints:
-            # Sort by step number
-            checkpoints = sorted(checkpoints, key=lambda x: int(x.split('-')[-1]))
-            latest_checkpoint = os.path.join(args.output_dir, checkpoints[-1])
-            print(f"Found checkpoint: {latest_checkpoint}")
-
     # Create a custom trainer with safetensors saving
     class CustomTrainer(Trainer):
         def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
@@ -666,6 +740,8 @@ def main():
                 for block in model.transformer.h:
                     if hasattr(block, 'mlp') and hasattr(block.mlp, 'moe'):
                         moe_layer = block.mlp.moe
+                        
+                        # Get routing statistics from Tutel MOELayer
                         if hasattr(moe_layer, 'l_aux') and moe_layer.l_aux is not None:
                             if isinstance(moe_layer.l_aux, torch.Tensor):
                                 aux_loss += moe_layer.l_aux
@@ -674,6 +750,9 @@ def main():
             
             # Total loss = language modeling loss + weighted auxiliary loss
             total_loss = lm_loss + aux_loss_weight * aux_loss
+            
+            # Store the last computed loss for logging callback
+            self._last_total_loss = total_loss.item() if hasattr(total_loss, 'item') else float(total_loss)
             
             # Log the loss components occasionally
             if hasattr(self, '_loss_log_counter'):
@@ -685,7 +764,31 @@ def main():
                 logger.info(f"Loss breakdown: LM={lm_loss:.4f}, Aux={aux_loss:.4f}, Total={total_loss:.4f}")
             
             return (total_loss, outputs) if return_outputs else total_loss
-        
+
+        def training_step(self, model, inputs, num_items_in_batch=None):
+            """
+            Override training step to ensure our custom loss is used and logged correctly.
+            """
+            model.train()
+            inputs = self._prepare_inputs(inputs)
+
+            with self.compute_loss_context_manager():
+                loss = self.compute_loss(model, inputs)
+
+            if self.args.n_gpu > 1:
+                loss = loss.mean()  # mean() to average on multi-gpu parallel training
+
+            if self.use_apex:
+                with amp.scale_loss(loss, self.optimizer) as scaled_loss:
+                    scaled_loss.backward()
+            else:
+                self.accelerator.backward(loss)
+
+            # Store the loss for logging - this is the key fix
+            self.state.log_history.append({"loss": loss.item(), "step": self.state.global_step})
+            
+            return loss.detach() / self.args.gradient_accumulation_steps
+
         def _save(self, output_dir: Optional[str] = None, state_dict=None):
             output_dir = output_dir if output_dir is not None else self.args.output_dir
             os.makedirs(output_dir, exist_ok=True)
@@ -730,6 +833,17 @@ def main():
             # Fall back to default loading
             return super()._load_from_checkpoint(resume_from_checkpoint, model)
 
+        def _load_optimizer_and_scheduler(self, checkpoint):
+            """Override to skip loading optimizer/scheduler state to avoid PyTorch security check."""
+            logger.info("Skipping optimizer/scheduler state loading to avoid PyTorch security check")
+            logger.info("Starting with fresh optimizer/scheduler state")
+            pass
+
+        def _load_scaler(self, checkpoint):
+            """Override to skip loading scaler state to avoid PyTorch security check."""
+            logger.info("Skipping scaler state loading to avoid PyTorch security check")
+            pass
+
         def create_scheduler(self, num_training_steps: int, optimizer: torch.optim.Optimizer = None):
             """Create a CosineAnnealingWarmRestarts LR scheduler.
 
@@ -748,10 +862,83 @@ def main():
                     T_mult=2,
                 )
             return self.lr_scheduler
+
+    # Training arguments with enhanced settings (compatible with older Transformers)
+    training_args = TrainingArguments(
+        output_dir=args.output_dir,
+        num_train_epochs=5,  # Increased to 10 epochs
+        per_device_train_batch_size=4,  # Keep batch size the same
+        gradient_accumulation_steps=8,  # Effective batch size of 32
+        learning_rate=5e-5,  # Initial learning rate
+        weight_decay=0.01,
+        warmup_ratio=0.1,  # 10% of training steps for warmup
+        # Logging
+        logging_steps=100,  # Log every 100 steps
+        logging_first_step=True,
+        logging_dir=os.path.join(args.output_dir, 'logs'),
+        # Checkpointing
+        save_steps=1000,  # Save checkpoint every 1000 steps
+        save_total_limit=3,  # Keep last 3 checkpoints
+        # Performance
+        fp16=True,
+        dataloader_num_workers=4,  # Use more workers for faster data loading
+        disable_tqdm=False,  # Show progress bar
+        remove_unused_columns=True,
+        max_grad_norm=1.0,  # Gradient clipping
+        local_rank=-1,
+        no_cuda=False
+    )
+
+    # Use standard data collator for language modeling
+    data_collator = DataCollatorForLanguageModeling(
+        tokenizer=tokenizer,
+        mlm=False,  # No masked language modeling
+    )
+
+    # Initialize callbacks
+    progress_callback = ProgressCallback(training_args.max_steps)
+    lr_kick_callback = LrKickOnceCallback(factor=5.0, at_step=44500)  # Re-enabled to break plateau
+    moe_routing_callback = MoERoutingCallback(log_every=5)
+    
+    # Create output directory if it doesn't exist
+    os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(os.path.join(args.output_dir, 'logs'), exist_ok=True)
+    
+    # Find the latest checkpoint if it exists
+    latest_checkpoint = None
+    resume_from_checkpoint = None
+    if os.path.isdir(args.output_dir) and not args.ignore_checkpoint:
+        checkpoints = [d for d in os.listdir(args.output_dir) if d.startswith('checkpoint-')]
+        if checkpoints:
+            # Sort by step number
+            checkpoints = sorted(checkpoints, key=lambda x: int(x.split('-')[-1]))
+            latest_checkpoint = os.path.join(args.output_dir, checkpoints[-1])
+            resume_from_checkpoint = latest_checkpoint
+            print(f"Found checkpoint: {latest_checkpoint}")
+    elif os.path.isdir(args.output_dir) and args.ignore_checkpoint:
+        # Find latest checkpoint for model weights but don't resume training from it
+        checkpoints = [d for d in os.listdir(args.output_dir) if d.startswith('checkpoint-')]
+        if checkpoints:
+            checkpoints = sorted(checkpoints, key=lambda x: int(x.split('-')[-1]))
+            latest_checkpoint = os.path.join(args.output_dir, checkpoints[-1])
+            print(f"Found checkpoint for model weights: {latest_checkpoint}")
+            print("Will load model weights but start training from step 1 (--ignore_checkpoint)")
+        else:
+            print("No checkpoints found, starting fresh training")
     
     # Load model weights from checkpoint if exists
-    if latest_checkpoint and os.path.isdir(latest_checkpoint):
+    if latest_checkpoint and os.path.isdir(latest_checkpoint) and not args.ignore_checkpoint:
         print(f"Loading model weights from {latest_checkpoint}")
+        # Load the model state dict directly
+        model_path = os.path.join(latest_checkpoint, 'pytorch_model.bin')
+        if os.path.exists(model_path):
+            state_dict = torch.load(model_path, map_location='cpu')
+            model.load_state_dict(state_dict, strict=False)
+            print("Model weights loaded successfully")
+        else:
+            print(f"Warning: Model weights not found at {model_path}")
+    elif latest_checkpoint and os.path.isdir(latest_checkpoint) and args.ignore_checkpoint:
+        print(f"Loading model weights from {latest_checkpoint} but starting from step 1")
         # Load the model state dict directly
         model_path = os.path.join(latest_checkpoint, 'pytorch_model.bin')
         if os.path.exists(model_path):
@@ -768,11 +955,16 @@ def main():
         train_dataset=train_ds,
         eval_dataset=val_ds,
         data_collator=data_collator,
-        callbacks=[progress_callback, moe_routing_callback, CheckpointInfoCallback()],
+        callbacks=[
+            progress_callback, 
+            #lr_kick_callback, 
+            moe_routing_callback, 
+            CheckpointInfoCallback()
+        ],
     )
     
     # Start fresh training (with loaded weights)
-    trainer.train()
+    trainer.train(resume_from_checkpoint=resume_from_checkpoint)
 
 if __name__ == "__main__":
     main()
