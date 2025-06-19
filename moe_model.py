@@ -4,7 +4,7 @@ from transformers import GPT2Config, GPT2PreTrainedModel, AutoModelForCausalLM
 from transformers.generation import GenerationMixin
 from tutel import moe as tutel_moe
 
-NUM_EXPERTS = 16
+NUM_EXPERTS = 10
 
 class MoEBlock(nn.Module):
     """Top‑2 MoE feed‑forward layer using Tutel"""
