@@ -45,10 +45,30 @@ def _extract_logits(outputs):
     """Return logits tensor from HF ModelOutput **or** custom dict."""
     if outputs is None:
         raise ValueError("Model returned None outputs")
+    
+    # Handle dict-like outputs
     if isinstance(outputs, dict):
-        return outputs.get("logits")
-    # HuggingFace models return CausalLMOutputWithCrossAttentions or similar
-    return getattr(outputs, "logits", None)
+        logits = outputs.get("logits")
+        if logits is not None:
+            return logits
+    
+    # Handle HuggingFace ModelOutput objects
+    if hasattr(outputs, "logits") and outputs.logits is not None:
+        return outputs.logits
+    
+    # Handle tuple outputs (some models return tuples)
+    if isinstance(outputs, tuple) and len(outputs) > 0:
+        # First element is usually logits
+        return outputs[0]
+    
+    # Last resort: try to get the first tensor-like attribute
+    for attr_name in ['logits', 'prediction_scores', 'scores']:
+        if hasattr(outputs, attr_name):
+            attr_value = getattr(outputs, attr_name)
+            if attr_value is not None:
+                return attr_value
+    
+    raise ValueError(f"Could not extract logits from model output of type {type(outputs)}. Available attributes: {dir(outputs) if hasattr(outputs, '__dict__') else 'N/A'}")
 
 def _greedy_generate(model, tokenizer, input_ids, max_new_tokens: int = 60, device: torch.device = None):
     """Very small helper that performs greedy decoding when `model.generate` is unavailable."""
@@ -86,78 +106,60 @@ def human_count(n: int) -> str:
 
 
 def load_model(checkpoint: str, device: torch.device):
-    """Load a checkpoint with support for MoE models."""
+    """Load a checkpoint with support for MoE models, based on chat.py logic."""
+    from pathlib import Path
+    import torch
+    from transformers import AutoTokenizer
+    from moe_model import GPT2WithMoE
+
     checkpoint_path = Path(checkpoint)
     if not checkpoint_path.is_dir():
         raise FileNotFoundError(f"Checkpoint directory not found at {checkpoint_path}")
 
     print(f"Loading model from {checkpoint_path}...")
 
-    # 1. Find model weights
-    model_file = None
-    safetensors_file = checkpoint_path / "model.safetensors"
-    bin_file = checkpoint_path / "pytorch_model.bin"
-
-    if safetensors_file.exists():
-        model_file = safetensors_file
-    elif bin_file.exists():
-        model_file = bin_file
-    
-    if model_file is None:
-        raise FileNotFoundError(f"No model weights found ('model.safetensors' or 'pytorch_model.bin') in {checkpoint_path}")
-
-    # 2. Load config
-    config_path = checkpoint_path / "config.json"
-    if not config_path.exists():
-        raise FileNotFoundError(f"Config file not found at {config_path}")
-    
-    config = AutoConfig.from_pretrained(str(config_path))
-
-    # 3. Determine model type and initialize
-    # Check for MoE clues in the config's 'architectures' field.
-    # This check is now safe and handles cases where 'architectures' is missing.
-    is_moe = False
-    architectures = getattr(config, "architectures", None)
-    if architectures:
-        is_moe = any("MoE" in arch for arch in architectures)
-    
-    # As a fallback, we can also check the class name if it's stored
-    if not is_moe and "GPT2WithMoE" in getattr(config, "model_type", ""):
-        is_moe = True
-
-    if is_moe:
-        print("MoE model detected. Loading with GPT2WithMoE.")
-        # Import locally to avoid circular dependency issues
-        from moe_model import GPT2WithMoE
-        model = GPT2WithMoE(config)
-    else:
-        print("Standard model detected. Loading with AutoModelForCausalLM.")
-        model = AutoModelForCausalLM.from_config(config)
-
-    # 4. Load state dictionary
-    print(f"Loading weights from {model_file}...")
-    if model_file.suffix == '.safetensors':
-        from safetensors.torch import load_file
-        state_dict = load_file(model_file, device=str(device))
-    else:
-        state_dict = torch.load(model_file, map_location=device)
-
-    # Use strict=False to handle missing keys gracefully.
-    model.load_state_dict(state_dict, strict=False)
-    
-    model.to(device)
-    model.eval()
-
-    # 5. Load tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(
-        str(checkpoint_path),
-        use_fast=True,
-        trust_remote_code=True
-    )
+    # Load tokenizer from base GPT-2 (not from checkpoint)
+    print("Loading tokenizer...")
+    tokenizer = AutoTokenizer.from_pretrained('gpt2')
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    print("Model and tokenizer loaded successfully.")
+    # Load model config and check for required files
+    config_path = checkpoint_path / "config.json"
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found at {config_path}")
+
+    # Find model weights
+    safetensors_path = checkpoint_path / "model.safetensors"
+    pytorch_path = checkpoint_path / "pytorch_model.bin"
+
+    # Initialize model with config
+    print("Loading model configuration...")
+    model = GPT2WithMoE.from_pretrained(
+        str(checkpoint_path),
+        config=str(config_path),
+        local_files_only=True,
+        ignore_mismatched_sizes=True
+    )
+
+    # Load weights
+    print("Loading model weights...")
+    if safetensors_path.exists():
+        print("Loading from safetensors...")
+        from safetensors.torch import load_file
+        state_dict = load_file(safetensors_path, device=str(device))
+        model.load_state_dict(state_dict, strict=False)
+    elif pytorch_path.exists():
+        print("Loading from PyTorch checkpoint...")
+        state_dict = torch.load(pytorch_path, map_location=device)
+        model.load_state_dict(state_dict, strict=False)
+    else:
+        raise FileNotFoundError(f"No model weights found in {checkpoint_path}")
+
+    model.to(device)
+    model.eval()
+    print("Model loaded successfully!")
+
     return model, tokenizer
 
 

@@ -46,9 +46,9 @@ BaseDatasetLoader = LazyLoader('.base.dataset_loader', 'BaseDatasetLoader')
 DatasetConfig = LazyLoader('.base.dataset_loader', 'DatasetConfig')
 
 # Lazy load utilities
-create_conversational_mix = LazyLoader('.utils', 'create_conversational_mix')
-DatasetMixer = LazyLoader('.utils', 'DatasetMixer')
-SmartSampler = LazyLoader('.utils', 'SmartSampler')
+create_conversational_mix = LazyLoader('data_modules.utils.mixing', 'create_conversational_mix')
+DatasetMixer = LazyLoader('data_modules.utils.mixing', 'DatasetMixer')
+SmartSampler = LazyLoader('data_modules.utils.sampling', 'SmartSampler')
 
 # Lazy load dataset loaders
 def create_openassistant_loader(*args, **kwargs):

@@ -120,12 +120,10 @@ class DatasetMixer:
     ) -> List[int]:
         """Calculate how many samples to take from each dataset."""
         if total_samples is None:
-            # Use proportional to smallest dataset to avoid over-sampling
-            min_effective_size = min(
-                len(data) / ratios.get(name, 1.0) 
-                for data, name in datasets
-            )
-            total_samples = int(min_effective_size)
+            # Use the sum of all available data, respecting ratios
+            total_available = sum(len(data) for data, _ in datasets)
+            total_samples = total_available
+            self.logger.info(f"No total_samples specified, using all available data: {total_samples}")
         
         sample_counts = []
         for data, name in datasets:
@@ -133,6 +131,7 @@ class DatasetMixer:
             # Don't exceed available data
             actual_count = min(target_count, len(data))
             sample_counts.append(actual_count)
+            self.logger.debug(f"{name}: target={target_count}, actual={actual_count}, available={len(data)}")
         
         return sample_counts
     

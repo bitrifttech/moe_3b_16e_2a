@@ -109,7 +109,7 @@ def create_wikipedia_loader(
     date: str = "20220301",
     max_samples: int = 50000, 
     max_length: int = 600,
-    percent_to_load: int = 1
+    percent_to_load: int = 10
 ) -> WikipediaLoader:
     """Factory function to create Wikipedia loader with custom config."""
     config = DatasetConfig(

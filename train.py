@@ -615,17 +615,17 @@ def load_datasets_with_loader(tokenizer, args):
         # Load OpenAssistant if not using conversation dataset
         if not args.use_conversation:
             oa_loader = create_openassistant_loader(
-                max_samples=args.max_samples // 2,
+                max_samples=args.max_samples,
                 max_length=args.max_length
             )
             oa_train, oa_val, _ = oa_loader.load_and_process()
             datasets.append(("openassistant", oa_train, oa_val))
         
-        # Load Anthropic HH-RLHF (conversational)
+        # Load Anthropic HH if enabled
         if args.use_conversation:
             hh_loader = create_anthropic_hh_loader(
                 subset="helpful-base",
-                max_samples=args.max_samples // 2,
+                max_samples=args.max_samples,
                 max_length=args.max_length
             )
             hh_train, hh_val, _ = hh_loader.load_and_process()
@@ -635,7 +635,7 @@ def load_datasets_with_loader(tokenizer, args):
         if args.use_sharegpt:
             try:
                 sgpt_loader = create_sharegpt_loader(
-                    max_samples=args.max_samples // 3,
+                    max_samples=args.max_samples,
                     max_length=args.max_length
                 )
                 sgpt_train, sgpt_val, _ = sgpt_loader.load_and_process()
@@ -646,7 +646,7 @@ def load_datasets_with_loader(tokenizer, args):
         # Load Alpaca if enabled
         if args.use_alpaca:
             alpaca_loader = create_alpaca_loader(
-                max_samples=args.max_samples // 4,
+                max_samples=args.max_samples,
                 max_length=args.max_length
             )
             alpaca_train, alpaca_val, _ = alpaca_loader.load_and_process()
@@ -655,9 +655,8 @@ def load_datasets_with_loader(tokenizer, args):
         # Load Wikipedia if enabled
         if args.use_wiki:
             wiki_loader = create_wikipedia_loader(
-                max_samples=args.max_samples // 3,
-                max_length=args.max_length,
-                percent_to_load=5
+                max_samples=args.max_samples,
+                max_length=args.max_length
             )
             wiki_train, wiki_val, _ = wiki_loader.load_and_process()
             datasets.append(("wikipedia", wiki_train, wiki_val))
@@ -665,7 +664,7 @@ def load_datasets_with_loader(tokenizer, args):
         # Load The Pile if enabled
         if args.use_pile:
             pile_loader = create_the_pile_loader(
-                max_samples=args.max_samples // 2,
+                max_samples=args.max_samples,
                 max_length=args.max_length
             )
             pile_train, pile_val, _ = pile_loader.load_and_process()
@@ -684,29 +683,17 @@ def load_datasets_with_loader(tokenizer, args):
         if len(datasets) == 1:
             return datasets[0][1], datasets[0][2]  # Return single dataset as is
         
-        # For multiple datasets, use the DatasetMixer
-        mixer = DatasetMixer()
+        # For multiple datasets, just concatenate them (no complex mixing)
+        all_train = []
+        all_val = []
         
-        # Calculate total samples per dataset (proportional to their size)
-        total_samples = min(sum(len(d[0]) for d in datasets), args.max_samples)
-        ratios = {name: len(train) for name, train, _ in datasets}
-        total_size = sum(ratios.values())
-        ratios = {k: v/total_size for k, v in ratios.items()}
+        for name, train, val in datasets:
+            all_train.extend(train)
+            all_val.extend(val)
+            logger.info(f"{name} - Train: {len(train)}, Val: {len(val)}")
         
-        # Mix datasets
-        mixed_train, train_stats = mixer.mix_datasets(
-            [(train, name) for name, train, _ in datasets],
-            mixing_strategy="custom",
-            custom_ratios=ratios,
-            total_samples=total_samples
-        )
-        
-        # For validation, just concatenate all validation sets
-        val_sets = [val for _, _, val in datasets]
-        mixed_val = [item for sublist in val_sets for item in sublist]
-        
-        logger.info(f"Created mixed dataset with {len(mixed_train)} training and {len(mixed_val)} validation samples")
-        return mixed_train, mixed_val
+        logger.info(f"Combined dataset - Train: {len(all_train)}, Val: {len(all_val)}")
+        return all_train, all_val
         
     except Exception as e:
         logger.error(f"Error in dataset loading: {e}")
@@ -733,7 +720,7 @@ def main():
     parser.add_argument("--use_conversation", action="store_true", help="Use conversational dataset (HH-RLHF) to improve chat abilities")
     parser.add_argument("--use_sharegpt", action="store_true", help="Use ShareGPT dataset for training")
     parser.add_argument("--use_alpaca", action="store_true", help="Use Alpaca instruction dataset for training")
-    parser.add_argument("--max_samples", type=int, default=50000, help="Maximum number of training samples")
+    parser.add_argument("--max_samples", type=int, default=50000, help="Maximum number of samples per individual dataset")
     parser.add_argument("--max_length", type=int, default=512, help="Maximum sequence length")
     parser.add_argument("--ignore_checkpoint", action="store_true", help="Ignore existing checkpoints and start training from step 1")
     parser.add_argument("--batch_size", type=int, default=8, help="Batch size per device during training.")
@@ -811,7 +798,7 @@ def main():
         # Optionally add Wikipedia
         if args.use_wiki:
             print("Loading Wikipedia dataset...")
-            wiki_train_ds, wiki_val_ds = load_wikipedia_dataset(tokenizer, max_len=args.max_length, percent=5)
+            wiki_train_ds, wiki_val_ds = load_wikipedia_dataset(tokenizer, max_len=args.max_length)
             oa_train_ds, oa_val_ds = combine_datasets((oa_train_ds, oa_val_ds), (wiki_train_ds, wiki_val_ds))
 
         if args.use_pile:
