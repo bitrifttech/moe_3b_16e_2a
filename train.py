@@ -5,23 +5,36 @@ import argparse
 import time
 import numpy as np
 import glob
-from typing import Optional
+from typing import Optional, List, Dict, Any
 from tqdm import tqdm
-from datasets import load_dataset
-from torch.utils.data import Dataset, DataLoader
+from datasets import load_dataset, Dataset, concatenate_datasets
+from torch.utils.data import Dataset as TorchDataset, DataLoader
 from transformers import (
     GPT2Config, GPT2Tokenizer, AutoTokenizer, Trainer, TrainingArguments,
-    default_data_collator, set_seed
+    default_data_collator, set_seed, DataCollatorForLanguageModeling
 )
-from transformers import DataCollatorForLanguageModeling
 from bitsandbytes.optim import Adam8bit
-import logging
 from tqdm.auto import tqdm
 from transformers import TrainerCallback, TrainingArguments, TrainerState, TrainerControl
 import json
 from datetime import datetime
 import pathlib
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
+
+# Import dataset loaders from the correct module path
+from data_modules import (
+    create_openassistant_loader,
+    create_anthropic_hh_loader,
+    create_sharegpt_loader,
+    create_alpaca_loader,
+    create_wikipedia_loader,
+    create_the_pile_loader,
+    create_conversational_mix,
+    DatasetMixer
+)
+
+# Import the actual Dataset class from datasets
+from datasets import Dataset
 
 # Insert a constant MODEL_SCALE (0.8) after the imports so that model size is reduced by 20%
 MODEL_SCALE = 1.0
@@ -594,10 +607,112 @@ def load_conversational_dataset(tokenizer, max_len=256, max_samples=50000):
             return None, None
 
 
+def load_datasets_with_loader(tokenizer, args):
+    """Load datasets using the new modular system."""
+    datasets = []
+    
+    try:
+        # Load OpenAssistant if not using conversation dataset
+        if not args.use_conversation:
+            oa_loader = create_openassistant_loader(
+                max_samples=args.max_samples // 2,
+                max_length=args.max_length
+            )
+            oa_train, oa_val, _ = oa_loader.load_and_process()
+            datasets.append(("openassistant", oa_train, oa_val))
+        
+        # Load Anthropic HH-RLHF (conversational)
+        if args.use_conversation:
+            hh_loader = create_anthropic_hh_loader(
+                subset="helpful-base",
+                max_samples=args.max_samples // 2,
+                max_length=args.max_length
+            )
+            hh_train, hh_val, _ = hh_loader.load_and_process()
+            datasets.append(("anthropic_hh", hh_train, hh_val))
+        
+        # Load ShareGPT if enabled
+        if args.use_sharegpt:
+            try:
+                sgpt_loader = create_sharegpt_loader(
+                    max_samples=args.max_samples // 3,
+                    max_length=args.max_length
+                )
+                sgpt_train, sgpt_val, _ = sgpt_loader.load_and_process()
+                datasets.append(("sharegpt", sgpt_train, sgpt_val))
+            except Exception as e:
+                logger.warning(f"Failed to load ShareGPT: {e}")
+        
+        # Load Alpaca if enabled
+        if args.use_alpaca:
+            alpaca_loader = create_alpaca_loader(
+                max_samples=args.max_samples // 4,
+                max_length=args.max_length
+            )
+            alpaca_train, alpaca_val, _ = alpaca_loader.load_and_process()
+            datasets.append(("alpaca", alpaca_train, alpaca_val))
+        
+        # Load Wikipedia if enabled
+        if args.use_wiki:
+            wiki_loader = create_wikipedia_loader(
+                max_samples=args.max_samples // 3,
+                max_length=args.max_length
+            )
+            wiki_train, wiki_val, _ = wiki_loader.load_and_process()
+            datasets.append(("wikipedia", wiki_train, wiki_val))
+        
+        # Load The Pile if enabled
+        if args.use_pile:
+            pile_loader = create_the_pile_loader(
+                max_samples=args.max_samples // 2,
+                max_length=args.max_length
+            )
+            pile_train, pile_val, _ = pile_loader.load_and_process()
+            datasets.append(("the_pile", pile_train, pile_val))
+        
+        # If no datasets were loaded, use OpenAssistant as default
+        if not datasets:
+            oa_loader = create_openassistant_loader(
+                max_samples=args.max_samples,
+                max_length=args.max_length
+            )
+            oa_train, oa_val, _ = oa_loader.load_and_process()
+            datasets.append(("openassistant", oa_train, oa_val))
+        
+        # Combine all datasets
+        if len(datasets) == 1:
+            return datasets[0][1], datasets[0][2]  # Return single dataset as is
+        
+        # For multiple datasets, use the DatasetMixer
+        mixer = DatasetMixer()
+        
+        # Calculate total samples per dataset (proportional to their size)
+        total_samples = min(sum(len(d[0]) for d in datasets), args.max_samples)
+        ratios = {name: len(train) for name, train, _ in datasets}
+        total_size = sum(ratios.values())
+        ratios = {k: v/total_size for k, v in ratios.items()}
+        
+        # Mix datasets
+        mixed_train, train_stats = mixer.mix_datasets(
+            [(train, name) for name, train, _ in datasets],
+            mixing_strategy="custom",
+            custom_ratios=ratios,
+            total_samples=total_samples
+        )
+        
+        # For validation, just concatenate all validation sets
+        val_sets = [val for _, _, val in datasets]
+        mixed_val = [item for sublist in val_sets for item in sublist]
+        
+        logger.info(f"Created mixed dataset with {len(mixed_train)} training and {len(mixed_val)} validation samples")
+        return mixed_train, mixed_val
+        
+    except Exception as e:
+        logger.error(f"Error in dataset loading: {e}")
+        raise
+
 def combine_datasets(dataset1, dataset2):
     """Combine two datasets by interleaving their examples."""
-    from datasets import concatenate_datasets
-    
     combined_train = concatenate_datasets([dataset1[0], dataset2[0]])
     combined_val = concatenate_datasets([dataset1[1], dataset2[1]])
     
@@ -615,7 +730,18 @@ def main():
     parser.add_argument("--use_pile", action="store_true", help="Use The Pile dataset in addition to OpenAssistant")
     parser.add_argument("--use_wiki", action="store_true", help="Use Wikipedia dataset in addition to OpenAssistant")
     parser.add_argument("--use_conversation", action="store_true", help="Use conversational dataset (HH-RLHF) to improve chat abilities")
+    parser.add_argument("--use_sharegpt", action="store_true", help="Use ShareGPT dataset for training")
+    parser.add_argument("--use_alpaca", action="store_true", help="Use Alpaca instruction dataset for training")
+    parser.add_argument("--max_samples", type=int, default=50000, help="Maximum number of training samples")
+    parser.add_argument("--max_length", type=int, default=512, help="Maximum sequence length")
     parser.add_argument("--ignore_checkpoint", action="store_true", help="Ignore existing checkpoints and start training from step 1")
+    parser.add_argument("--batch_size", type=int, default=8, help="Batch size per device during training.")
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=4, help="Number of updates steps to accumulate before performing a backward/update pass.")
+    parser.add_argument("--learning_rate", type=float, default=5e-5, help="The initial learning rate for AdamW.")
+    parser.add_argument("--warmup_steps", type=int, default=500, help="Linear warmup over warmup_steps.")
+    parser.add_argument("--warmup_ratio", type=float, default=0.0, help="Linear warmup over warmup_ratio of total steps.")
+    parser.add_argument("--save_steps", type=int, default=1000, help="Save checkpoint every X updates steps.")
+    parser.add_argument("--logging_steps", type=int, default=10, help="Log every X updates steps.")
     args = parser.parse_args()
 
     # Set up logging
@@ -630,37 +756,74 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # Load OpenAssistant dataset
-    print("Loading OpenAssistant OASST1 dataset...")
-    oa_train_ds, oa_val_ds = load_openassistant_dataset(tokenizer, max_len=256)
-    
-    # Optionally add conversational dataset first
-    if args.use_conversation:
-        print("Loading conversational dataset for improved chat abilities...")
-        conv_train_ds, conv_val_ds = load_conversational_dataset(tokenizer, max_len=256, max_samples=30000)
-        if conv_train_ds is not None and conv_val_ds is not None:
-            oa_train_ds, oa_val_ds = combine_datasets((oa_train_ds, oa_val_ds), (conv_train_ds, conv_val_ds))
-            print("Successfully integrated conversational dataset!")
-        else:
-            print("Failed to load conversational dataset, continuing with existing datasets...")
-    
-    # Optionally add Wikipedia (so we can still combine with pile too)
-    if args.use_wiki:
-        print("Loading Wikipedia dataset…")
-        wiki_train_ds, wiki_val_ds = load_wikipedia_dataset(tokenizer, max_len=256, percent=10)
-        oa_train_ds, oa_val_ds = combine_datasets((oa_train_ds, oa_val_ds), (wiki_train_ds, wiki_val_ds))
-
-    if args.use_pile:
-        print("Loading The Pile dataset...")
-        pile_train_ds, pile_val_ds = load_pile_dataset(tokenizer, max_len=256)
+    # Load datasets using the new modular system
+    print("Loading datasets using the modular dataset system...")
+    try:
+        train_ds, val_ds = load_datasets_with_loader(tokenizer, args)
         
-        print("Combining datasets...")
-        train_ds, val_ds = combine_datasets(
-            (oa_train_ds, oa_val_ds),
-            (pile_train_ds, pile_val_ds)
-        )
-    else:
-        train_ds, val_ds = oa_train_ds, oa_val_ds
+        # Convert to Dataset objects if they're lists
+        if isinstance(train_ds, list):
+            train_ds = Dataset.from_dict({"text": [item["text"] for item in train_ds]})
+            val_ds = Dataset.from_dict({"text": [item["text"] for item in val_ds]})
+            
+            # Tokenize the datasets
+            def tokenize_function(examples):
+                return tokenizer(
+                    examples["text"],
+                    padding="max_length",
+                    truncation=True,
+                    max_length=args.max_length,
+                    return_tensors="pt"
+                )
+                
+            train_ds = train_ds.map(
+                tokenize_function,
+                batched=True,
+                remove_columns=["text"],
+                desc="Tokenizing training data"
+            )
+            val_ds = val_ds.map(
+                tokenize_function,
+                batched=True,
+                remove_columns=["text"],
+                desc="Tokenizing validation data"
+            )
+            
+    except Exception as e:
+        logger.error(f"Error loading datasets: {e}")
+        logger.info("Falling back to default dataset loading...")
+        
+        # Fallback to original dataset loading
+        print("Loading OpenAssistant OASST1 dataset...")
+        oa_train_ds, oa_val_ds = load_openassistant_dataset(tokenizer, max_len=args.max_length)
+        
+        # Optionally add conversational dataset first
+        if args.use_conversation:
+            print("Loading conversational dataset for improved chat abilities...")
+            conv_train_ds, conv_val_ds = load_conversational_dataset(tokenizer, max_len=args.max_length, max_samples=30000)
+            if conv_train_ds is not None and conv_val_ds is not None:
+                oa_train_ds, oa_val_ds = combine_datasets((oa_train_ds, oa_val_ds), (conv_train_ds, conv_val_ds))
+                print("Successfully integrated conversational dataset!")
+            else:
+                print("Failed to load conversational dataset, continuing with existing datasets...")
+        
+        # Optionally add Wikipedia
+        if args.use_wiki:
+            print("Loading Wikipedia dataset...")
+            wiki_train_ds, wiki_val_ds = load_wikipedia_dataset(tokenizer, max_len=args.max_length, percent=10)
+            oa_train_ds, oa_val_ds = combine_datasets((oa_train_ds, oa_val_ds), (wiki_train_ds, wiki_val_ds))
+
+        if args.use_pile:
+            print("Loading The Pile dataset...")
+            pile_train_ds, pile_val_ds = load_pile_dataset(tokenizer, max_len=args.max_length)
+            
+            print("Combining datasets...")
+            train_ds, val_ds = combine_datasets(
+                (oa_train_ds, oa_val_ds),
+                (pile_train_ds, pile_val_ds)
+            )
+        else:
+            train_ds, val_ds = oa_train_ds, oa_val_ds
     
     _print_split_stats("Final Combined", train_ds, val_ds)
     print(f"Training samples: {len(train_ds)}")
@@ -866,18 +1029,19 @@ def main():
     # Training arguments with enhanced settings (compatible with older Transformers)
     training_args = TrainingArguments(
         output_dir=args.output_dir,
-        num_train_epochs=5,  # Increased to 10 epochs
-        per_device_train_batch_size=4,  # Keep batch size the same
-        gradient_accumulation_steps=8,  # Effective batch size of 32
-        learning_rate=5e-5,  # Initial learning rate
+        num_train_epochs=args.epochs,
+        per_device_train_batch_size=args.batch_size,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        learning_rate=args.learning_rate,
         weight_decay=0.01,
-        warmup_ratio=0.1,  # 10% of training steps for warmup
+        warmup_ratio=args.warmup_ratio,
+        warmup_steps=args.warmup_steps,
         # Logging
-        logging_steps=100,  # Log every 100 steps
+        logging_steps=args.logging_steps,
         logging_first_step=True,
         logging_dir=os.path.join(args.output_dir, 'logs'),
         # Checkpointing
-        save_steps=1000,  # Save checkpoint every 1000 steps
+        save_steps=args.save_steps,
         save_total_limit=3,  # Keep last 3 checkpoints
         # Performance
         fp16=True,
