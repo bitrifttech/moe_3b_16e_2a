@@ -27,6 +27,10 @@ from data_modules import (
     create_anthropic_hh_loader,
     create_sharegpt_loader,
     create_alpaca_loader,
+    create_ultrachat_loader,
+    create_openorca_loader,
+    create_lmsys_chat_loader,
+    create_chatbot_arena_loader,
     create_wikipedia_loader,
     create_the_pile_loader,
     create_conversational_mix,
@@ -670,6 +674,42 @@ def load_datasets_with_loader(tokenizer, args):
             pile_train, pile_val, _ = pile_loader.load_and_process()
             datasets.append(("the_pile", pile_train, pile_val))
         
+        # Load UltraChat if enabled
+        if args.use_ultrachat:
+            ultrachat_loader = create_ultrachat_loader(
+                max_samples=args.max_samples,
+                max_length=args.max_length
+            )
+            ultrachat_train, ultrachat_val, _ = ultrachat_loader.load_and_process()
+            datasets.append(("ultrachat", ultrachat_train, ultrachat_val))
+        
+        # Load OpenOrca if enabled
+        if args.use_openorca:
+            openorca_loader = create_openorca_loader(
+                max_samples=args.max_samples,
+                max_length=args.max_length
+            )
+            openorca_train, openorca_val, _ = openorca_loader.load_and_process()
+            datasets.append(("openorca", openorca_train, openorca_val))
+        
+        # Load LMSYS Chat-1M if enabled
+        if args.use_lmsys_chat:
+            lmsys_chat_loader = create_lmsys_chat_loader(
+                max_samples=args.max_samples,
+                max_length=args.max_length
+            )
+            lmsys_chat_train, lmsys_chat_val, _ = lmsys_chat_loader.load_and_process()
+            datasets.append(("lmsys_chat", lmsys_chat_train, lmsys_chat_val))
+        
+        # Load Chatbot Arena if enabled
+        if args.use_chatbot_arena:
+            chatbot_arena_loader = create_chatbot_arena_loader(
+                max_samples=args.max_samples,
+                max_length=args.max_length
+            )
+            chatbot_arena_train, chatbot_arena_val, _ = chatbot_arena_loader.load_and_process()
+            datasets.append(("chatbot_arena", chatbot_arena_train, chatbot_arena_val))
+        
         # If no datasets were loaded, use OpenAssistant as default
         if not datasets:
             oa_loader = create_openassistant_loader(
@@ -720,6 +760,10 @@ def main():
     parser.add_argument("--use_conversation", action="store_true", help="Use conversational dataset (HH-RLHF) to improve chat abilities")
     parser.add_argument("--use_sharegpt", action="store_true", help="Use ShareGPT dataset for training")
     parser.add_argument("--use_alpaca", action="store_true", help="Use Alpaca instruction dataset for training")
+    parser.add_argument("--use_ultrachat", action="store_true", help="Use UltraChat 200k dataset for high-quality conversations")
+    parser.add_argument("--use_openorca", action="store_true", help="Use OpenOrca dataset for GPT-4 quality responses")
+    parser.add_argument("--use_lmsys_chat", action="store_true", help="Use LMSYS Chat-1M dataset for real-world conversations")
+    parser.add_argument("--use_chatbot_arena", action="store_true", help="Use Chatbot Arena dataset for human-preferred responses")
     parser.add_argument("--max_samples", type=int, default=50000, help="Maximum number of samples per individual dataset")
     parser.add_argument("--max_length", type=int, default=512, help="Maximum sequence length")
     parser.add_argument("--ignore_checkpoint", action="store_true", help="Ignore existing checkpoints and start training from step 1")

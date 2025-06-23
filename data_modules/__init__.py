@@ -67,6 +67,22 @@ def create_alpaca_loader(*args, **kwargs):
     from .conversational.alpaca import create_alpaca_loader as _create
     return _create(*args, **kwargs)
 
+def create_ultrachat_loader(*args, **kwargs):
+    from .conversational.ultrachat import create_ultrachat_loader as _create
+    return _create(*args, **kwargs)
+
+def create_openorca_loader(*args, **kwargs):
+    from .conversational.openorca import create_openorca_loader as _create
+    return _create(*args, **kwargs)
+
+def create_lmsys_chat_loader(*args, **kwargs):
+    from .conversational.lmsys_chat import create_lmsys_chat_loader as _create
+    return _create(*args, **kwargs)
+
+def create_chatbot_arena_loader(*args, **kwargs):
+    from .conversational.chatbot_arena import create_chatbot_arena_loader as _create
+    return _create(*args, **kwargs)
+
 def create_wikipedia_loader(*args, **kwargs):
     from .knowledge.wikipedia import create_wikipedia_loader as _create
     return _create(*args, **kwargs)
@@ -91,6 +107,10 @@ __all__ = [
     'create_anthropic_hh_loader',
     'create_sharegpt_loader',
     'create_alpaca_loader',
+    'create_ultrachat_loader',
+    'create_openorca_loader',
+    'create_lmsys_chat_loader',
+    'create_chatbot_arena_loader',
     'create_wikipedia_loader',
     'create_the_pile_loader',
 ]
