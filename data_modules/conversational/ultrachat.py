@@ -45,6 +45,17 @@ class UltraChatLoader(BaseDatasetLoader):
             self.logger.error(f"Failed to load UltraChat dataset: {e}")
             raise
     
+    def preprocess(self, raw_data: Any) -> List[Dict[str, str]]:
+        """Preprocess UltraChat raw data into standardized format."""
+        processed_data = []
+        
+        for example in raw_data:
+            processed_example = self.process_example(example)
+            if processed_example is not None:
+                processed_data.append(processed_example)
+        
+        return processed_data
+    
     def process_example(self, example: Dict[str, Any]) -> Dict[str, str]:
         """Process a single UltraChat example into conversation format."""
         try:
