@@ -5,7 +5,7 @@ Loads and processes ShareGPT dataset for conversational training.
 Real ChatGPT conversations shared by users.
 """
 
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from datasets import load_dataset as hf_load_dataset
 from ..base import BaseDatasetLoader, DatasetConfig
 
@@ -135,6 +135,30 @@ class ShareGPTLoader(BaseDatasetLoader):
             return False
         
         return True
+    
+    def process_example(self, example: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Process a single ShareGPT example into conversation format."""
+        try:
+            # Check if already processed (has 'text' field)
+            if "text" in example:
+                text = example["text"].strip()
+                
+                # Quality checks
+                if len(text) < self.config.min_length or len(text) > self.config.max_length:
+                    return None
+                
+                # Apply custom filters to the text
+                if not self._apply_custom_filters({"text": text}):
+                    return None
+                
+                return {"text": text}
+            
+            else:
+                # ShareGPT should already be preprocessed, but handle edge cases
+                return None
+                
+        except Exception as e:
+            return None
 
 def create_sharegpt_loader(max_samples: int = 20000, max_length: int = 500) -> ShareGPTLoader:
     """Factory function to create ShareGPT loader with custom config."""

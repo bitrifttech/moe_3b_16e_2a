@@ -4,7 +4,7 @@ Anthropic HH-RLHF Dataset Loader
 Loads and processes the Anthropic HH-RLHF dataset for conversational training.
 """
 
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from datasets import load_dataset as hf_load_dataset
 from ..base import BaseDatasetLoader, DatasetConfig
 
@@ -112,6 +112,25 @@ class AnthropicHHLoader(BaseDatasetLoader):
             
         # Keep helpful, informative responses
         return True
+    
+    def process_example(self, example: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Process a single preprocessed Anthropic HH example."""
+        try:
+            # Handle preprocessed format (should have 'text' field)
+            if "text" in example:
+                text = example["text"].strip()
+                
+                # Basic quality checks
+                if len(text) < self.config.min_length or len(text) > self.config.max_length:
+                    return None
+                
+                return {"text": text}
+            else:
+                # This shouldn't happen as preprocess should create 'text' field
+                return None
+                
+        except Exception as e:
+            return None
 
 def create_anthropic_hh_loader(
     subset: str = "helpful-base", 

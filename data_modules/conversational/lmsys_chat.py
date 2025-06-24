@@ -5,7 +5,7 @@ Loads and processes LMSYS Chat-1M dataset for conversational training.
 Real-world conversations with 25 state-of-the-art LLMs.
 """
 
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import json
 from datasets import load_dataset as hf_load_dataset
 from ..base import BaseDatasetLoader, DatasetConfig
@@ -16,9 +16,9 @@ class LMSYSChatLoader(BaseDatasetLoader):
     def __init__(self, config: DatasetConfig = None):
         if config is None:
             config = DatasetConfig(
-                name="LMSYS-Chat",
+                name="LMSYS-Chat-1M",
                 max_samples=50000,
-                max_length=512,
+                max_length=1536,  # Increased from 512 for longer conversations
                 min_length=50
             )
         super().__init__(config)
@@ -31,12 +31,24 @@ class LMSYSChatLoader(BaseDatasetLoader):
             dataset = hf_load_dataset("lmsys/lmsys-chat-1m")
             
             if "train" in dataset:
-                return dataset["train"]
+                train_data = dataset["train"]
             else:
                 # Take the first available split
                 split_name = list(dataset.keys())[0]
                 self.logger.info(f"Using split '{split_name}' from LMSYS Chat")
-                return dataset[split_name]
+                train_data = dataset[split_name]
+            
+            # Sample from the dataset instead of returning the whole thing
+            if self.config.shuffle:
+                # Shuffle and take a sample
+                shuffled = train_data.shuffle(seed=self.config.seed)
+                sample_data = shuffled.select(range(min(self.config.max_samples, len(shuffled))))
+            else:
+                # Just take the first max_samples
+                sample_data = train_data.select(range(min(self.config.max_samples, len(train_data))))
+            
+            # Convert to list of dicts for easier processing
+            return [sample_data[i] for i in range(len(sample_data))]
                 
         except Exception as e:
             self.logger.error(f"Failed to load LMSYS Chat dataset: {e}")
@@ -48,24 +60,19 @@ class LMSYSChatLoader(BaseDatasetLoader):
         processed_data = []
         
         for example in raw_data:
-            processed_example = self.process_example(example)
-            if processed_example is not None:
-                processed_data.append(processed_example)
+            # Process the raw example directly into conversation format
+            conversation_text = self._format_conversation(example)
+            if conversation_text:
+                processed_data.append({"text": conversation_text})
         
         return processed_data
     
-    def process_example(self, example: Dict[str, Any]) -> Dict[str, str]:
-        """Process a single LMSYS Chat example into conversation format."""
+    def _format_conversation(self, example: Dict[str, Any]) -> Optional[str]:
+        """Convert LMSYS raw example into conversation text format."""
         try:
-            # LMSYS format: conversation is in JSON format
+            # LMSYS format: conversation is already a list of message dicts
             conversation_data = example.get("conversation", [])
             model_name = example.get("model", "unknown")
-            
-            if isinstance(conversation_data, str):
-                try:
-                    conversation_data = json.loads(conversation_data)
-                except json.JSONDecodeError:
-                    return None
             
             if not conversation_data or not isinstance(conversation_data, list):
                 return None
@@ -109,22 +116,66 @@ class LMSYSChatLoader(BaseDatasetLoader):
                 return None
             
             # Filter out conversations with PII redaction artifacts
-            if "NAME_" in text and text.count("NAME_") > 3:
+            if "NAME_" in text and text.count("NAME_") > 5:  # Increased threshold
                 return None
             
             # Filter out conversations flagged by moderation
-            if example.get("openai_moderation", {}).get("flagged", False):
-                return None
+            moderation_list = example.get("openai_moderation", [])
+            if isinstance(moderation_list, list) and len(moderation_list) > 0:
+                # Check if any turn is flagged
+                any_flagged = any(mod.get("flagged", False) for mod in moderation_list if isinstance(mod, dict))
+                if any_flagged:
+                    return None
             
             # Language filter - prefer English
             language = example.get("language", "en")
-            if language != "en":
+            if language.lower() not in ["en", "english", "american english", "british english"]:
                 return None
             
-            return {"text": text}
+            # Filter conversations that are too repetitive
+            if self._is_repetitive(text):
+                return None
+                
+            return text
             
         except Exception as e:
-            self.logger.warning(f"Error processing LMSYS Chat example: {e}")
+            return None
+    
+    def _is_repetitive(self, text: str) -> bool:
+        """Check if text is overly repetitive."""
+        # Simple repetition check - look for repeated phrases
+        lines = text.split('\n')
+        if len(lines) < 3:
+            return False
+        
+        # Check for repeated lines
+        line_counts = {}
+        for line in lines:
+            cleaned_line = line.strip().lower()
+            if len(cleaned_line) > 10:  # Only check substantial lines
+                line_counts[cleaned_line] = line_counts.get(cleaned_line, 0) + 1
+        
+        # If any line appears more than 3 times, consider it repetitive
+        max_repeats = max(line_counts.values()) if line_counts else 0
+        return max_repeats > 3
+    
+    def process_example(self, example: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Process a single preprocessed LMSYS Chat example."""
+        try:
+            # Handle preprocessed format (should have 'text' field)
+            if "text" in example:
+                text = example["text"].strip()
+                
+                # Basic quality checks
+                if len(text) < self.config.min_length or len(text) > self.config.max_length:
+                    return None
+                
+                return {"text": text}
+            else:
+                # Fallback to format raw data if needed
+                return {"text": self._format_conversation(example)} if self._format_conversation(example) else None
+                
+        except Exception as e:
             return None
     
     def get_dataset_info(self) -> Dict[str, Any]:
@@ -139,12 +190,12 @@ class LMSYSChatLoader(BaseDatasetLoader):
             "note": "Requires accepting terms of use on HuggingFace"
         }
 
-def create_lmsys_chat_loader(max_samples: int = 50000, max_length: int = 512) -> LMSYSChatLoader:
+def create_lmsys_chat_loader(max_samples: int = 30000, max_length: int = 6000) -> LMSYSChatLoader:
     """Factory function to create LMSYS Chat loader with custom config."""
     config = DatasetConfig(
-        name="LMSYS-Chat",
+        name="LMSYS-Chat-1M",
         max_samples=max_samples,
-        max_length=max_length,
+        max_length=max_length,  # Increased from 512 for longer conversations
         min_length=50
     )
     return LMSYSChatLoader(config)

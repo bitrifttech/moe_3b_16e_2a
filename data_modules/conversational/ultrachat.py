@@ -5,7 +5,7 @@ Loads and processes UltraChat 200k dataset for conversational training.
 High-quality filtered conversations used to train Zephyr-7B-β.
 """
 
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from datasets import load_dataset as hf_load_dataset
 from ..base import BaseDatasetLoader, DatasetConfig
 
@@ -17,7 +17,7 @@ class UltraChatLoader(BaseDatasetLoader):
             config = DatasetConfig(
                 name="UltraChat",
                 max_samples=50000,
-                max_length=512,
+                max_length=1536,  # ~384 tokens (4 chars per token average)
                 min_length=50
             )
         super().__init__(config)
@@ -56,61 +56,85 @@ class UltraChatLoader(BaseDatasetLoader):
         
         return processed_data
     
-    def process_example(self, example: Dict[str, Any]) -> Dict[str, str]:
+    def process_example(self, example: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Process a single UltraChat example into conversation format."""
         try:
-            # UltraChat format: {"messages": [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]}
-            if "messages" in example:
-                messages = example["messages"]
-            else:
-                # Fallback if structure is different
-                return None
-            
-            if not messages or len(messages) < 2:
-                return None
-            
-            # Extract conversation
-            conversation_parts = []
-            for msg in messages:
-                role = msg.get("role", "")
-                content = msg.get("content", "").strip()
+            # Check if already processed (has 'text' field)
+            if "text" in example:
+                text = example["text"].strip()
                 
-                if not content:
-                    continue
+                # Quality checks
+                if len(text) < self.config.min_length or len(text) > self.config.max_length:
+                    return None
+                
+                # Check for robotic responses (already filtered in UltraChat 200k, but double-check)
+                lower_text = text.lower()
+                robotic_phrases = [
+                    "i don't have emotions",
+                    "i do not have emotions", 
+                    "i don't have opinions",
+                    "i do not have opinions",
+                    "as an ai",
+                    "i'm just an ai"
+                ]
+                
+                if any(phrase in lower_text for phrase in robotic_phrases):
+                    return None
+                
+                return {"text": text}
+            
+            # Original logic for raw messages format (fallback)
+            elif "messages" in example:
+                messages = example["messages"]
+                
+                if not messages or len(messages) < 2:
+                    return None
+                
+                # Extract conversation
+                conversation_parts = []
+                for msg in messages:
+                    role = msg.get("role", "")
+                    content = msg.get("content", "").strip()
                     
-                if role == "user":
-                    conversation_parts.append(f"Human: {content}")
-                elif role == "assistant":
-                    conversation_parts.append(f"Assistant: {content}")
+                    if not content:
+                        continue
+                        
+                    if role == "user":
+                        conversation_parts.append(f"Human: {content}")
+                    elif role == "assistant":
+                        conversation_parts.append(f"Assistant: {content}")
+                
+                if len(conversation_parts) < 2:
+                    return None
+                
+                # Join conversation with newlines
+                text = "\n\n".join(conversation_parts)
+                
+                # Quality checks
+                if len(text) < self.config.min_length or len(text) > self.config.max_length:
+                    return None
+                
+                # Check for robotic responses
+                lower_text = text.lower()
+                robotic_phrases = [
+                    "i don't have emotions",
+                    "i do not have emotions", 
+                    "i don't have opinions",
+                    "i do not have opinions",
+                    "as an ai",
+                    "i'm just an ai"
+                ]
+                
+                if any(phrase in lower_text for phrase in robotic_phrases):
+                    return None
+                
+                return {"text": text}
             
-            if len(conversation_parts) < 2:
+            else:
+                # Neither text nor messages format
                 return None
-            
-            # Join conversation with newlines
-            text = "\n\n".join(conversation_parts)
-            
-            # Quality checks
-            if len(text) < self.config.min_length or len(text) > self.config.max_length:
-                return None
-            
-            # Check for robotic responses (already filtered in UltraChat 200k, but double-check)
-            lower_text = text.lower()
-            robotic_phrases = [
-                "i don't have emotions",
-                "i do not have emotions", 
-                "i don't have opinions",
-                "i do not have opinions",
-                "as an ai",
-                "i'm just an ai"
-            ]
-            
-            if any(phrase in lower_text for phrase in robotic_phrases):
-                return None
-            
-            return {"text": text}
-            
+                
         except Exception as e:
-            self.logger.warning(f"Error processing UltraChat example: {e}")
             return None
     
     def get_dataset_info(self) -> Dict[str, Any]:
@@ -124,7 +148,7 @@ class UltraChatLoader(BaseDatasetLoader):
             "use_case": "Natural conversation flow, reduced robotic responses"
         }
 
-def create_ultrachat_loader(max_samples: int = 50000, max_length: int = 512) -> UltraChatLoader:
+def create_ultrachat_loader(max_samples: int = 50000, max_length: int = 1536) -> UltraChatLoader:
     """Factory function to create UltraChat loader with custom config."""
     config = DatasetConfig(
         name="UltraChat",
