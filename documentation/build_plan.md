@@ -1,8 +1,6 @@
-Excellent — you're now in *engineer mode*, so I’ll build this very explicitly so both you and an LLM agent can follow it, and you can execute this inside Cursor, Windsurf, VSCode, or any modern AI-assisted IDE.
-
 ---
 
-# 🏗 **Complete Build Plan: 3B MoE Instruction Follower on 4060 (16GB VRAM)**
+# 🏗 **Complete Build Plan: 500M MoE Instruction Follower on 4060 (16GB VRAM)**
 
 ---
 
@@ -52,7 +50,7 @@ pip install nvidia-cuda-runtime-cu12
 
 # 2️⃣ Dataset Preparation
 
-We’ll begin with **OpenAssistant OASST1** to get diverse instruction-following data.
+We'll begin with **OpenAssistant OASST1** to get diverse instruction-following data.
 
 ```python
 from datasets import load_dataset
@@ -121,7 +119,7 @@ class GPT2WithMoE(GPT2PreTrainedModel):
                 block.mlp = MoEBlock(
                     d_model=config.n_embd,
                     d_ff=config.n_inner,
-                    num_experts=16,   # <--- 16 experts
+                    num_experts=10,   # <--- 10 experts
                     k=2
                 )
     def forward(self, input_ids, attention_mask=None, labels=None):
@@ -137,29 +135,29 @@ class GPT2WithMoE(GPT2PreTrainedModel):
 
 # 4️⃣ Model Config
 
-We’re roughly targeting GPT-2 Large sized backbone to hit \~3B MoE total params.
+We're targeting a compact MoE architecture to achieve \~500M total parameters.
 
 ```python
 from transformers import GPT2Config
 
 config = GPT2Config(
     vocab_size=tokenizer.vocab_size,
-    n_positions=1024,
-    n_embd=1280,    # Larger embedding size
-    n_layer=24,     # More transformer layers
-    n_head=20,      # More heads
-    n_inner=5120,   # Wider FFN
+    n_positions=512,
+    n_embd=1024,    # Embedding size
+    n_layer=8,      # 8 transformer layers
+    n_head=16,      # 16 attention heads
+    n_inner=4096,   # FFN dimension
     pad_token_id=tokenizer.pad_token_id
 )
 
 model = GPT2WithMoE(config)
 ```
 
-This will create a roughly \~3B MoE model:
+This will create a roughly \~500M MoE model:
 
-* 16 experts (≈ 150M each)
+* 10 experts with MoE layers on every other layer (4 MoE layers total)
 * 2 experts active per token
-* 300M active params per forward pass
+* ~507M total parameters
 * Efficiently trainable on 4060
 
 ---
@@ -262,13 +260,13 @@ After training finishes:
 | Component      | Value                          |
 | -------------- | ------------------------------ |
 | Model type     | GPT2 MoE                       |
-| Total params   | \~3B                           |
-| Active params  | \~300M                         |
-| Experts        | 16                             |
+| Total params   | \~500M                         |
+| Active params  | \~50M                          |
+| Experts        | 10                             |
 | Active experts | 2                              |
 | Precision      | 8-bit mixed precision          |
 | Optimizer      | bitsandbytes Adam8bit          |
-| Training time  | \~7-10 days on 4060            |
+| Training time  | \~3-5 days on 4060             |
 | Deployment     | Fully local inference possible |
 
 ---
@@ -281,20 +279,6 @@ You can hand your LLM assistant this system message:
 
 > **SYSTEM PROMPT FOR AGENT**
 
-You are building a GPT2-MoE model with 16 experts, 2 active experts per token, for instruction following chatbots. The model will have \~3B total parameters, trained on the OpenAssistant OASST1 dataset, using HuggingFace Transformers, Tutel for MoE routing, BitsAndBytes 8-bit optimizer, and trained on a single NVIDIA 4060 with 16GB VRAM. Use mixed 8-bit + fp16 precision. Implement gradient checkpointing, Adam8bit optimizer, and a 1024 sequence length. Use Deepspeed Stage 2 optimizer offloading if needed. Model definition uses custom subclassing of GPT2PreTrainedModel to inject MoE layers.
-
----
-
-# 🚀
-
-👉👉👉
-
-**If you want, I can even now generate:**
-
-* ✅ Complete project repo scaffold
-* ✅ `train.py` file
-* ✅ `moe_model.py` file
-* ✅ Dataset preprocessing pipeline
-* ✅ Full training launch scripts
+You are building a GPT2-MoE model with 10 experts, 2 active experts per token, for instruction following chatbots. The model will have \~500M total parameters, trained on the OpenAssistant OASST1 dataset, using HuggingFace Transformers, Tutel for MoE routing, BitsAndBytes 8-bit optimizer, and trained on a single NVIDIA 4060 with 16GB VRAM. Use mixed 8-bit + fp16 precision. Implement gradient checkpointing, Adam8bit optimizer, and a 1024 sequence length. Use Deepspeed Stage 2 optimizer offloading if needed. Model definition uses custom subclassing of GPT2PreTrainedModel to inject MoE layers.
 
 ---
