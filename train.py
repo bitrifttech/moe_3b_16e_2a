@@ -755,6 +755,24 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output_dir", type=str, default="outputs")
     parser.add_argument("--epochs", type=int, default=1)
+    
+    # Architecture selection
+    parser.add_argument("--architecture", type=str, choices=["moe", "dense"], default="moe", 
+                       help="Choose model architecture: 'moe' for MoE transformer, 'dense' for standard transformer")
+    parser.add_argument("--model_size", type=str, choices=["medium", "large", "200m", "400m", "600m", "800m", "1.5b"], default="800m",
+                       help="Dense model size (ignored for MoE architecture)")
+    parser.add_argument("--use_flash_attention", action="store_true", default=True,
+                       help="Use flash attention for memory efficiency (dense models only)")
+    parser.add_argument("--no_flash_attention", action="store_true", 
+                       help="Disable flash attention (use standard attention)")
+    parser.add_argument("--gradient_checkpointing", action="store_true",
+                       help="Enable gradient checkpointing to reduce memory usage")
+    parser.add_argument("--fp16", action="store_true", default=True,
+                       help="Enable mixed precision training with FP16 (default: True)")
+    parser.add_argument("--no_fp16", action="store_true",
+                       help="Disable FP16 mixed precision training")
+    parser.add_argument("--bf16", action="store_true",
+                       help="Use BF16 instead of FP16 (requires newer hardware)")
     parser.add_argument("--use_pile", action="store_true", help="Use The Pile dataset in addition to OpenAssistant")
     parser.add_argument("--use_wiki", action="store_true", help="Use Wikipedia dataset in addition to OpenAssistant")
     parser.add_argument("--use_conversation", action="store_true", help="Use conversational dataset (HH-RLHF) to improve chat abilities")
@@ -767,6 +785,8 @@ def main():
     parser.add_argument("--max_samples", type=int, default=50000, help="Maximum number of samples per individual dataset")
     parser.add_argument("--max_length", type=int, default=512, help="Maximum sequence length")
     parser.add_argument("--ignore_checkpoint", action="store_true", help="Ignore existing checkpoints and start training from step 1")
+    
+    # Training hyperparameters  
     parser.add_argument("--batch_size", type=int, default=8, help="Batch size per device during training.")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=4, help="Number of updates steps to accumulate before performing a backward/update pass.")
     parser.add_argument("--learning_rate", type=float, default=5e-5, help="The initial learning rate for AdamW.")
@@ -790,6 +810,14 @@ def main():
 
     # Load datasets using the new modular system
     print("Loading datasets using the modular dataset system...")
+    # Handle mixed precision training flags
+    if args.no_fp16:
+        args.fp16 = False
+    if args.bf16:
+        args.fp16 = False  # BF16 and FP16 are mutually exclusive
+    
+    print(f"Mixed precision training: FP16={args.fp16}, BF16={args.bf16}")
+    
     try:
         train_ds, val_ds = load_datasets_with_loader(tokenizer, args)
         
@@ -875,43 +903,113 @@ def main():
     
     # Tokenization is already handled in the dataset loading functions
 
-    # Model configuration - slightly larger model
-    cfg = GPT2Config(
-        vocab_size=len(tokenizer),
-        n_positions=512,  # Increased context length
-        n_embd=1024,  # Increased model capacity
-        n_layer=8,  # Increased from 6
-        n_head=16,  # Increased from 12
-        n_inner=4096,  # Increased feed-forward dimension
-        activation_function="gelu_new",
-        resid_pdrop=0.1,
-        embd_pdrop=0.1,
-        attn_pdrop=0.1,
-        layer_norm_epsilon=1e-5,
-        initializer_range=0.02,
-        summary_type="cls_index",
-        summary_use_proj=True,
-        summary_activation=None,
-        summary_proj_to_labels=True,
-        summary_first_dropout=0.1,
-        use_cache=True,
-        bos_token_id=tokenizer.bos_token_id,
-        eos_token_id=tokenizer.eos_token_id,
-        pad_token_id=tokenizer.pad_token_id,
-        num_labels=1,
-        output_attentions=False,
-        output_hidden_states=False,
-        return_dict=True,
-    )
+    # Model configuration and creation based on architecture choice
+    if args.architecture == "moe":
+        print(f"Creating MoE model architecture...")
+        # MoE model configuration - existing configuration
+        cfg = GPT2Config(
+            vocab_size=len(tokenizer),
+            n_positions=512,  # Increased context length
+            n_embd=1024,  # Increased model capacity
+            n_layer=8,  # Increased from 6
+            n_head=16,  # Increased from 12
+            n_inner=4096,  # Increased feed-forward dimension
+            activation_function="gelu_new",
+            resid_pdrop=0.1,
+            embd_pdrop=0.1,
+            attn_pdrop=0.1,
+            layer_norm_epsilon=1e-5,
+            initializer_range=0.02,
+            summary_type="cls_index",
+            summary_use_proj=True,
+            summary_activation=None,
+            summary_proj_to_labels=True,
+            summary_first_dropout=0.1,
+            use_cache=True,
+            bos_token_id=tokenizer.bos_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+            pad_token_id=tokenizer.pad_token_id,
+            num_labels=1,
+            output_attentions=False,
+            output_hidden_states=False,
+            return_dict=True,
+        )
 
-    from moe_model import GPT2WithMoE
-    model = GPT2WithMoE(cfg)
-
+        from moe_model import GPT2WithMoE
+        model = GPT2WithMoE(cfg)
+        print(f"Created MoE model with ~500M active parameters")
+        
+    elif args.architecture == "dense":
+        print(f"Creating dense model architecture: {args.model_size}")
+        from dense_model import create_dense_config, GPT2Dense, get_model_info
+        
+        # Create configuration for the chosen model size
+        cfg = create_dense_config(args.model_size, use_flash_attention=not args.no_flash_attention)
+        
+        # Update tokenizer-specific settings
+        cfg.vocab_size = len(tokenizer)
+        cfg.bos_token_id = tokenizer.bos_token_id
+        cfg.eos_token_id = tokenizer.eos_token_id
+        cfg.pad_token_id = tokenizer.pad_token_id
+        
+        # Adjust context length based on max_length argument
+        cfg.n_positions = max(cfg.n_positions, args.max_length)
+        
+        model = GPT2Dense(cfg)
+        
+        # Enable gradient checkpointing if requested
+        if args.gradient_checkpointing:
+            model.gradient_checkpointing_enable()
+            print("✓ Gradient checkpointing enabled")
+        
+        # Print model information
+        info = get_model_info(cfg)
+        print(f"Created dense model:")
+        print(f"  Parameters: {info['total_params_m']:.1f}M")
+        print(f"  Layers: {info['layers']}")
+        print(f"  Hidden size: {info['hidden_size']}")
+        print(f"  Context length: {info['context_length']}")
+        print(f"  Memory (FP32): {info['memory_fp32_gb']:.2f} GB")
+        print(f"  Flash attention (SDPA): {not args.no_flash_attention}")
+        print(f"  Gradient checkpointing: {args.gradient_checkpointing}")
+    
+    else:
+        raise ValueError(f"Unknown architecture: {args.architecture}")
+    
+    # Save model configuration for reference
+    import json
+    model_config = {
+        "architecture": args.architecture,
+        "model_size": args.model_size if args.architecture == "dense" else "moe_500m",
+        "parameters": f"{get_model_info(cfg)['total_params_m']:.1f}M" if args.architecture == "dense" else "~500M active",
+        "config": cfg.to_dict(),
+        "training_args": {
+            "max_length": args.max_length,
+            "learning_rate": args.learning_rate,
+            "batch_size": args.batch_size,
+            "epochs": args.epochs,
+            "gradient_accumulation_steps": args.gradient_accumulation_steps
+        }
+    }
+    
+    # Create output directory early to save config
+    if args.architecture == "moe":
+        output_dir = f"{args.output_dir}_moe"
+    else:
+        output_dir = f"{args.output_dir}_dense_{args.model_size}"
+    
+    os.makedirs(output_dir, exist_ok=True)
+    
+    with open(os.path.join(output_dir, "model_config.json"), "w") as f:
+        json.dump(model_config, f, indent=2)
+    
+    print(f"Saved model configuration to {os.path.join(output_dir, 'model_config.json')}")
+    
     # Create a custom trainer with safetensors saving
     class CustomTrainer(Trainer):
         def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
             """
-            Compute loss including MoE auxiliary loss for load balancing.
+            Compute loss including MoE auxiliary loss for load balancing (MoE only).
             """
             labels = inputs.get("labels")
             # Forward pass
@@ -927,36 +1025,33 @@ def main():
             else:
                 lm_loss = outputs.loss
             
-            # Collect auxiliary losses from all MoE layers
-            aux_loss = 0.0
-            aux_loss_weight = 0.05  # Increased from 0.01 to 0.05 for stronger load balancing
-            
-            if hasattr(model, 'transformer') and hasattr(model.transformer, 'h'):
-                for block in model.transformer.h:
-                    if hasattr(block, 'mlp') and hasattr(block.mlp, 'moe'):
-                        moe_layer = block.mlp.moe
-                        
-                        # Get routing statistics from Tutel MOELayer
-                        if hasattr(moe_layer, 'l_aux') and moe_layer.l_aux is not None:
-                            if isinstance(moe_layer.l_aux, torch.Tensor):
-                                aux_loss += moe_layer.l_aux
-                            else:
-                                aux_loss += float(moe_layer.l_aux)
-            
-            # Total loss = language modeling loss + weighted auxiliary loss
-            total_loss = lm_loss + aux_loss_weight * aux_loss
-            
-            # Store the last computed loss for logging callback
-            self._last_total_loss = total_loss.item() if hasattr(total_loss, 'item') else float(total_loss)
-            
-            # Log the loss components occasionally
-            if hasattr(self, '_loss_log_counter'):
-                self._loss_log_counter += 1
-            else:
-                self._loss_log_counter = 1
+            # Only calculate auxiliary loss for MoE models
+            if args.architecture == "moe":
+                # Collect auxiliary losses from all MoE layers
+                aux_loss = 0.0
+                aux_loss_weight = 0.05  # Increased from 0.01 to 0.05 for stronger load balancing
                 
-            if self._loss_log_counter % 100 == 0:  # Log every 100 steps
-                logger.info(f"Loss breakdown: LM={lm_loss:.4f}, Aux={aux_loss:.4f}, Total={total_loss:.4f}")
+                if hasattr(model, 'transformer') and hasattr(model.transformer, 'h'):
+                    for block in model.transformer.h:
+                        if hasattr(block, 'mlp') and hasattr(block.mlp, 'moe'):
+                            moe_layer = block.mlp.moe
+                            
+                            # Get routing statistics from Tutel MOELayer
+                            if hasattr(moe_layer, 'l_aux') and moe_layer.l_aux is not None:
+                                if isinstance(moe_layer.l_aux, torch.Tensor):
+                                    aux_loss += moe_layer.l_aux
+                                else:
+                                    aux_loss += float(moe_layer.l_aux)
+                
+                # Total loss = language modeling loss + weighted auxiliary loss
+                total_loss = lm_loss + aux_loss_weight * aux_loss
+                
+                # Store the last computed loss for logging callback
+                self._last_total_loss = total_loss.item() if hasattr(total_loss, 'item') else float(total_loss)
+            else:
+                # Dense model: only use language modeling loss
+                total_loss = lm_loss
+                self._last_total_loss = total_loss.item() if hasattr(total_loss, 'item') else float(total_loss)
             
             return (total_loss, outputs) if return_outputs else total_loss
 
@@ -1059,8 +1154,14 @@ def main():
             return self.lr_scheduler
 
     # Training arguments with enhanced settings (compatible with older Transformers)
+    # Create output directory name that includes architecture info
+    if args.architecture == "moe":
+        output_dir = f"{args.output_dir}_moe"
+    else:
+        output_dir = f"{args.output_dir}_dense_{args.model_size}"
+    
     training_args = TrainingArguments(
-        output_dir=args.output_dir,
+        output_dir=output_dir,
         num_train_epochs=args.epochs,
         per_device_train_batch_size=args.batch_size,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
@@ -1071,12 +1172,13 @@ def main():
         # Logging
         logging_steps=args.logging_steps,
         logging_first_step=True,
-        logging_dir=os.path.join(args.output_dir, 'logs'),
+        logging_dir=os.path.join(output_dir, 'logs'),
         # Checkpointing
         save_steps=args.save_steps,
         save_total_limit=3,  # Keep last 3 checkpoints
         # Performance
-        fp16=True,
+        fp16=args.fp16,
+        bf16=args.bf16,
         dataloader_num_workers=4,  # Use more workers for faster data loading
         disable_tqdm=False,  # Show progress bar
         remove_unused_columns=True,
@@ -1091,58 +1193,69 @@ def main():
         mlm=False,  # No masked language modeling
     )
 
-    # Initialize callbacks
+    # Initialize callbacks based on architecture
     progress_callback = ProgressCallback(training_args.max_steps)
-    lr_kick_callback = LrKickOnceCallback(factor=5.0, at_step=44500)  # Re-enabled to break plateau
-    moe_routing_callback = MoERoutingCallback(log_every=5)
+    callbacks = [progress_callback, CheckpointInfoCallback()]
+    
+    if args.architecture == "moe":
+        # Add MoE-specific callbacks
+        lr_kick_callback = LrKickOnceCallback(factor=5.0, at_step=44500)  # Re-enabled to break plateau
+        moe_routing_callback = MoERoutingCallback(log_every=5)
+        callbacks.extend([lr_kick_callback, moe_routing_callback])
+        print("Added MoE-specific callbacks: LR kick and routing stats")
+    else:
+        print("Using standard callbacks for dense model")
     
     # Create output directory if it doesn't exist
-    os.makedirs(args.output_dir, exist_ok=True)
-    os.makedirs(os.path.join(args.output_dir, 'logs'), exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(os.path.join(output_dir, 'logs'), exist_ok=True)
     
     # Find the latest checkpoint if it exists
     latest_checkpoint = None
     resume_from_checkpoint = None
-    if os.path.isdir(args.output_dir) and not args.ignore_checkpoint:
-        checkpoints = [d for d in os.listdir(args.output_dir) if d.startswith('checkpoint-')]
+    if os.path.isdir(output_dir) and not args.ignore_checkpoint:
+        checkpoints = [d for d in os.listdir(output_dir) if d.startswith('checkpoint-')]
         if checkpoints:
             # Sort by step number
-            checkpoints = sorted(checkpoints, key=lambda x: int(x.split('-')[-1]))
-            latest_checkpoint = os.path.join(args.output_dir, checkpoints[-1])
-            resume_from_checkpoint = latest_checkpoint
-            print(f"Found checkpoint: {latest_checkpoint}")
-    elif os.path.isdir(args.output_dir) and args.ignore_checkpoint:
-        # Find latest checkpoint for model weights but don't resume training from it
-        checkpoints = [d for d in os.listdir(args.output_dir) if d.startswith('checkpoint-')]
-        if checkpoints:
-            checkpoints = sorted(checkpoints, key=lambda x: int(x.split('-')[-1]))
-            latest_checkpoint = os.path.join(args.output_dir, checkpoints[-1])
-            print(f"Found checkpoint for model weights: {latest_checkpoint}")
-            print("Will load model weights but start training from step 1 (--ignore_checkpoint)")
+            def extract_step(checkpoint_name):
+                try:
+                    return int(checkpoint_name.split('-')[-1])
+                except (ValueError, IndexError):
+                    return 0
+            
+            latest_checkpoint = max(checkpoints, key=extract_step)
+            resume_from_checkpoint = os.path.join(output_dir, latest_checkpoint)
+            logger.info(f"Found existing checkpoint: {resume_from_checkpoint}")
         else:
-            print("No checkpoints found, starting fresh training")
+            logger.info(f"No checkpoints found in {output_dir}")
+    else:
+        if args.ignore_checkpoint:
+            logger.info("Ignoring existing checkpoints due to --ignore_checkpoint flag")
+        else:
+            logger.info(f"Output directory {output_dir} does not exist")
     
-    # Load model weights from checkpoint if exists
-    if latest_checkpoint and os.path.isdir(latest_checkpoint) and not args.ignore_checkpoint:
-        print(f"Loading model weights from {latest_checkpoint}")
-        # Load the model state dict directly
-        model_path = os.path.join(latest_checkpoint, 'pytorch_model.bin')
-        if os.path.exists(model_path):
-            state_dict = torch.load(model_path, map_location='cpu')
-            model.load_state_dict(state_dict, strict=False)
-            print("Model weights loaded successfully")
+    # Handle the --ignore_checkpoint flag: load model weights but start from step 1
+    model_weights_loaded = False
+    if args.ignore_checkpoint and latest_checkpoint:
+        logger.info(f"Loading model weights from {resume_from_checkpoint} but starting training from step 1")
+        try:
+            from safetensors.torch import load_file
+            safetensors_path = os.path.join(resume_from_checkpoint, "model.safetensors")
+            if os.path.exists(safetensors_path):
+                state_dict = load_file(safetensors_path)
+                model.load_state_dict(state_dict, strict=False)
+                model_weights_loaded = True
+                logger.info("Successfully loaded model weights from checkpoint")
+                resume_from_checkpoint = None  # Don't resume training, just load weights
+            else:
+                logger.warning(f"Safetensors file not found at {safetensors_path}")
+        except Exception as e:
+            logger.error(f"Failed to load model weights: {e}")
+            
+        if model_weights_loaded:
+            logger.info("Will load model weights but start training from step 1")
         else:
-            print(f"Warning: Model weights not found at {model_path}")
-    elif latest_checkpoint and os.path.isdir(latest_checkpoint) and args.ignore_checkpoint:
-        print(f"Loading model weights from {latest_checkpoint} but starting from step 1")
-        # Load the model state dict directly
-        model_path = os.path.join(latest_checkpoint, 'pytorch_model.bin')
-        if os.path.exists(model_path):
-            state_dict = torch.load(model_path, map_location='cpu')
-            model.load_state_dict(state_dict, strict=False)
-            print("Model weights loaded successfully")
-        else:
-            print(f"Warning: Model weights not found at {model_path}")
+            logger.info("Could not load model weights, starting fresh training")
     
     # Initialize trainer
     trainer = CustomTrainer(
@@ -1151,12 +1264,7 @@ def main():
         train_dataset=train_ds,
         eval_dataset=val_ds,
         data_collator=data_collator,
-        callbacks=[
-            progress_callback, 
-            #lr_kick_callback, 
-            moe_routing_callback, 
-            CheckpointInfoCallback()
-        ],
+        callbacks=callbacks,
     )
     
     # Start fresh training (with loaded weights)
