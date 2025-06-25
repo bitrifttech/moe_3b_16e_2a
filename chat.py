@@ -4,8 +4,9 @@ import argparse
 import torch
 from transformers import AutoTokenizer
 
-# Import the custom model
+# Import both model types
 from moe_model import GPT2WithMoE
+from dense_model import GPT2Dense
 
 def find_latest_checkpoint(output_dir='checkpoints'):
     """Find the latest checkpoint in the output directory."""
@@ -16,11 +17,13 @@ def find_latest_checkpoint(output_dir='checkpoints'):
     return checkpoints[-1] if checkpoints else None
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Chat with a fine-tuned GPT-2 MoE model')
+    parser = argparse.ArgumentParser(description='Chat with a fine-tuned GPT-2 model')
     parser.add_argument('--checkpoint', type=str, default=None,
                        help='Path to the checkpoint directory. If not provided, uses the latest checkpoint in the checkpoints directory.')
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu',
                        help='Device to run the model on (default: cuda if available, else cpu)')
+    parser.add_argument('--architecture', type=str, choices=['moe', 'dense'], default='moe',
+                       help='Model architecture type (default: moe)')
     return parser.parse_args()
 
 def main():
@@ -37,7 +40,7 @@ def main():
         print(f"Checkpoint not found: {args.checkpoint}")
         return
 
-    print(f"Loading model from {args.checkpoint} ...")
+    print(f"Loading {args.architecture.upper()} model from {args.checkpoint} ...")
     
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained('gpt2')
@@ -55,14 +58,22 @@ def main():
     safetensors_path = os.path.join(args.checkpoint, 'model.safetensors')
     pytorch_path = os.path.join(args.checkpoint, 'pytorch_model.bin')
     
-    # Initialize model with config
+    # Initialize model with appropriate architecture
     print("Loading model configuration...")
-    model = GPT2WithMoE.from_pretrained(
-        args.checkpoint,
-        config=config_path,
-        local_files_only=True,
-        ignore_mismatched_sizes=True
-    )
+    if args.architecture == 'dense':
+        model = GPT2Dense.from_pretrained(
+            args.checkpoint,
+            config=config_path,
+            local_files_only=True,
+            ignore_mismatched_sizes=True
+        )
+    else:  # moe
+        model = GPT2WithMoE.from_pretrained(
+            args.checkpoint,
+            config=config_path,
+            local_files_only=True,
+            ignore_mismatched_sizes=True
+        )
     
     # Load weights
     print("Loading model weights...")
@@ -80,10 +91,11 @@ def main():
     
     model.to(args.device)
     model.eval()
-    print("Model loaded successfully!")
+    print(f"{args.architecture.upper()} model loaded successfully!")
 
     print("\nChatbot is ready! Type your message and press Enter. Type 'exit' to quit.\n")
     print(f"Running on device: {args.device}")
+    print(f"Model architecture: {args.architecture.upper()}")
     print("-" * 50)
     
     while True:
@@ -130,4 +142,4 @@ def main():
             continue
 
 if __name__ == '__main__':
-    main() 
+    main()
