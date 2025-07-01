@@ -41,9 +41,9 @@ class AnthropicHHLoader(BaseDatasetLoader):
     
     def preprocess(self, raw_data: Any) -> List[Dict[str, str]]:
         """
-        Process Anthropic HH data into conversation format.
+        Process Anthropic HH data into proper instruction-response format.
         
-        Extracts conversations and formats them properly.
+        Preserves full conversation context and formats as instruction-response pairs.
         """
         processed_data = []
         
@@ -51,34 +51,62 @@ class AnthropicHHLoader(BaseDatasetLoader):
             if "chosen" in item:
                 # Use the chosen response (preferred by human raters)
                 conversation = item["chosen"]
+                
+                # Format the full conversation properly
+                formatted_conversation = self._format_anthropic_conversation(conversation)
+                
+                if formatted_conversation and len(formatted_conversation.split()) >= self.config.min_length:
+                    processed_data.append({
+                        "text": formatted_conversation,
+                        "metadata": {
+                            "source": "anthropic_hh",
+                            "subset": self.subset,
+                            "type": "full_conversation",
+                            "quality": "chosen"  # This is the preferred response
+                        }
+                    })
             else:
                 # Fallback to OpenAssistant format if needed
                 if item.get("role") == "assistant" and item.get("lang") == "en":
                     conversation = item["text"]
-                else:
-                    continue
-            
-            if not conversation or not isinstance(conversation, str):
-                continue
-                
-            # Clean up the conversation
-            conversation = conversation.strip()
-            
-            # Split into turns if it's a multi-turn conversation
-            turns = self._extract_conversation_turns(conversation)
-            
-            for turn in turns:
-                if len(turn.split()) >= self.config.min_length:
-                    processed_data.append({
-                        "text": turn,
-                        "metadata": {
-                            "source": "anthropic_hh",
-                            "subset": self.subset,
-                            "type": "conversation"
-                        }
-                    })
+                    formatted_conversation = f"Assistant: {conversation}"
+                    
+                    if len(conversation.split()) >= self.config.min_length:
+                        processed_data.append({
+                            "text": formatted_conversation,
+                            "metadata": {
+                                "source": "openassistant_fallback",
+                                "subset": self.subset,
+                                "type": "single_response"
+                            }
+                        })
         
         return processed_data
+    
+    def _format_anthropic_conversation(self, conversation: str) -> str:
+        """Format Anthropic HH conversation into proper instruction-response format."""
+        if not conversation or not isinstance(conversation, str):
+            return ""
+        
+        conversation = conversation.strip()
+        
+        # Handle Anthropic format: \n\nHuman: ... \n\nAssistant: ...
+        if "\n\nHuman:" in conversation and "\n\nAssistant:" in conversation:
+            # Already in the correct format, just clean it up
+            formatted = conversation
+            
+            # Ensure proper spacing and formatting
+            formatted = formatted.replace("\n\nHuman:", "\n\nHuman:")
+            formatted = formatted.replace("\n\nAssistant:", "\n\nAssistant:")
+            
+            # Clean up extra whitespace
+            lines = [line.strip() for line in formatted.split('\n') if line.strip()]
+            formatted = '\n\n'.join(lines)
+            
+            return formatted
+        else:
+            # Single response or different format - treat as assistant response
+            return f"Assistant: {conversation}"
     
     def _extract_conversation_turns(self, conversation: str) -> List[str]:
         """Extract individual turns from a conversation."""
@@ -100,18 +128,28 @@ class AnthropicHHLoader(BaseDatasetLoader):
         """Apply Anthropic HH-specific filters."""
         text = item["text"]
         
-        # Filter out conversations that are too short
+        # Filter out conversations that are too short or too long
         word_count = len(text.split())
-        if word_count < 10 or word_count > 400:
+        if word_count < 20 or word_count > 800:  # Increased limits for full conversations
             return False
         
-        # Filter out conversations with harmful content markers
-        harmful_markers = ["I cannot", "I can't help", "I'm not able to", "I shouldn't"]
-        if any(marker.lower() in text.lower() for marker in harmful_markers):
+        # Ensure we have proper conversation structure
+        if "Human:" not in text and "Assistant:" not in text:
             return False
-            
-        # Keep helpful, informative responses
-        return True
+        
+        # Filter out conversations with refusal patterns (we want helpful responses)
+        refusal_patterns = [
+            "I cannot", "I can't help", "I'm not able to", "I shouldn't",
+            "I'm not allowed", "I refuse to", "I won't help", "I'm sorry, but I can't"
+        ]
+        if any(pattern.lower() in text.lower() for pattern in refusal_patterns):
+            return False
+        
+        # Ensure conversation has both human and assistant parts
+        has_human = "Human:" in text
+        has_assistant = "Assistant:" in text
+        
+        return has_human and has_assistant
     
     def process_example(self, example: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Process a single preprocessed Anthropic HH example."""

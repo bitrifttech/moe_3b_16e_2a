@@ -5,6 +5,7 @@ import argparse
 import time
 import numpy as np
 import glob
+import random
 from typing import Optional, List, Dict, Any
 from tqdm import tqdm
 from datasets import load_dataset, Dataset, concatenate_datasets
@@ -349,6 +350,88 @@ def seed_all(seed=42):
     torch.cuda.manual_seed_all(seed)
 
 
+def build_openassistant_conversations(ds):
+    """Build proper conversation threads from OpenAssistant dataset."""
+    # Group messages by conversation
+    conversations = {}
+    
+    for message in ds:
+        if message.get("lang") != "en":
+            continue
+            
+        conv_id = message.get("conversation_id")
+        if not conv_id:
+            continue
+            
+        if conv_id not in conversations:
+            conversations[conv_id] = []
+        conversations[conv_id].append(message)
+    
+    # Build threaded conversations
+    formatted_conversations = []
+    
+    for conv_id, messages in conversations.items():
+        # Build message thread
+        thread = build_message_thread(messages)
+        if len(thread) >= 2:  # Need at least human + assistant
+            formatted_text = format_conversation_thread(thread)
+            if formatted_text:
+                formatted_conversations.append({"text": formatted_text})
+    
+    return Dataset.from_list(formatted_conversations)
+
+
+def build_message_thread(messages):
+    """Build a single conversation thread from messages."""
+    # Create a mapping of message_id to message
+    msg_map = {msg["message_id"]: msg for msg in messages}
+    
+    # Find the root message (no parent)
+    root_messages = [msg for msg in messages if not msg.get("parent_id")]
+    if not root_messages:
+        return []
+    
+    # Build thread starting from root
+    thread = []
+    current_msg = root_messages[0]  # Take first root
+    
+    while current_msg:
+        thread.append(current_msg)
+        
+        # Find children of current message
+        children = [msg for msg in messages if msg.get("parent_id") == current_msg["message_id"]]
+        
+        if children:
+            # Take the highest ranked child (best response)
+            current_msg = max(children, key=lambda x: x.get("rank", 0))
+        else:
+            current_msg = None
+    
+    return thread
+
+
+def format_conversation_thread(thread):
+    """Format conversation thread as instruction-response pairs."""
+    formatted_parts = []
+    
+    for message in thread:
+        role = message.get("role", "")
+        text = message.get("text", "").strip()
+        
+        if not text:
+            continue
+        
+        if role == "prompter":  # Human/user message
+            formatted_parts.append(f"Human: {text}")
+        elif role == "assistant":  # Assistant response
+            formatted_parts.append(f"Assistant: {text}")
+    
+    if len(formatted_parts) >= 2:  # Need at least one exchange
+        return "\n\n".join(formatted_parts)
+    
+    return ""
+
+
 def load_openassistant_dataset(tok, max_len=256):
     """Load and preprocess the OpenAssistant OASST1 dataset."""
     from datasets import load_dataset, DatasetDict, concatenate_datasets
@@ -361,13 +444,13 @@ def load_openassistant_dataset(tok, max_len=256):
     if isinstance(ds, DatasetDict):
         ds = concatenate_datasets([ds[k] for k in ds.keys()])
     
-    print("Filtering for English assistant responses...")
-    # Filter for English assistant responses
-    ds = ds.filter(lambda x: x.get("lang") == "en" and x.get("role") == "assistant")
+    print("Building conversation threads...")
+    # Build proper conversation threads instead of just extracting assistant responses
+    conversations = build_openassistant_conversations(ds)
     
     print("Splitting into train/validation...")
     # Split into train and validation
-    split = ds.train_test_split(test_size=0.05, seed=42)
+    split = conversations.train_test_split(test_size=0.05, seed=42)
     
     def tok_fn(batch):
         # Tokenize without padding; dynamic padding will be added by the data collator
@@ -507,14 +590,23 @@ def load_conversational_dataset(tokenizer, max_len=256, max_samples=50000):
         print(f"Loaded {len(ds)} conversational examples")
         
         def format_conversation(example):
-            """Format the conversation into a single text string"""
+            """Format the conversation into proper instruction-response format"""
             chosen = example["chosen"]
             # Clean up the conversation format
             text = chosen.strip()
+            
+            # Ensure proper Human/Assistant formatting
+            if "\n\nHuman:" in text and "\n\nAssistant:" in text:
+                # Already properly formatted
+                formatted_text = text
+            else:
+                # Treat as assistant response if not properly formatted
+                formatted_text = f"Assistant: {text}"
+            
             # Ensure it ends with an EOS token
-            if not text.endswith(tokenizer.eos_token):
-                text += tokenizer.eos_token
-            return {"text": text}
+            if not formatted_text.endswith(tokenizer.eos_token):
+                formatted_text += tokenizer.eos_token
+            return {"text": formatted_text}
         
         # Format conversations
         ds = ds.map(format_conversation, remove_columns=ds.column_names)
@@ -573,9 +665,21 @@ def load_conversational_dataset(tokenizer, max_len=256, max_samples=50000):
             
             def format_oasst_conversation(example):
                 text = example["text"].strip()
-                if not text.endswith(tokenizer.eos_token):
-                    text += tokenizer.eos_token
-                return {"text": text}
+                
+                # Ensure proper conversation formatting
+                if example.get("role") == "assistant":
+                    # Format as assistant response with context if available
+                    formatted_text = f"Assistant: {text}"
+                elif example.get("role") == "prompter":
+                    # Format as human prompt
+                    formatted_text = f"Human: {text}"
+                else:
+                    # Default to assistant response
+                    formatted_text = f"Assistant: {text}"
+                
+                if not formatted_text.endswith(tokenizer.eos_token):
+                    formatted_text += tokenizer.eos_token
+                return {"text": formatted_text}
             
             ds = ds.map(format_oasst_conversation, remove_columns=ds.column_names)
             split = ds.train_test_split(test_size=0.05, seed=42)
@@ -775,15 +879,15 @@ def main():
                        help="Use BF16 instead of FP16 (requires newer hardware)")
     parser.add_argument("--use_pile", action="store_true", help="Use The Pile dataset in addition to OpenAssistant")
     parser.add_argument("--use_wiki", action="store_true", help="Use Wikipedia dataset in addition to OpenAssistant")
-    parser.add_argument("--use_conversation", action="store_true", help="Use conversational dataset (HH-RLHF) to improve chat abilities")
+    parser.add_argument("--use_conversation", action="store_true", default=True, help="Use conversational dataset (HH-RLHF) to improve chat abilities")
     parser.add_argument("--use_sharegpt", action="store_true", help="Use ShareGPT dataset for training")
-    parser.add_argument("--use_alpaca", action="store_true", help="Use Alpaca instruction dataset for training")
-    parser.add_argument("--use_ultrachat", action="store_true", help="Use UltraChat 200k dataset for high-quality conversations")
-    parser.add_argument("--use_openorca", action="store_true", help="Use OpenOrca dataset for GPT-4 quality responses")
+    parser.add_argument("--use_alpaca", action="store_true", default=True, help="Use Alpaca instruction dataset for training")
+    parser.add_argument("--use_ultrachat", action="store_true", default=True, help="Use UltraChat 200k dataset for high-quality conversations")
+    parser.add_argument("--use_openorca", action="store_true", default=True, help="Use OpenOrca dataset for GPT-4 quality responses")
     parser.add_argument("--use_lmsys_chat", action="store_true", help="Use LMSYS Chat-1M dataset for real-world conversations")
     parser.add_argument("--use_chatbot_arena", action="store_true", help="Use Chatbot Arena dataset for human-preferred responses")
-    parser.add_argument("--max_samples", type=int, default=50000, help="Maximum number of samples per individual dataset")
-    parser.add_argument("--max_length", type=int, default=512, help="Maximum sequence length")
+    parser.add_argument("--max_samples", type=int, default=25000, help="Maximum number of samples per individual dataset")
+    parser.add_argument("--max_length", type=int, default=1024, help="Maximum sequence length")
     parser.add_argument("--ignore_checkpoint", action="store_true", help="Ignore existing checkpoints and start training from step 1")
     
     # Training hyperparameters  
@@ -909,7 +1013,7 @@ def main():
         # MoE model configuration - existing configuration
         cfg = GPT2Config(
             vocab_size=len(tokenizer),
-            n_positions=512,  # Increased context length
+            n_positions=max(1024, args.max_length),  # Use longer context length
             n_embd=1024,  # Increased model capacity
             n_layer=8,  # Increased from 6
             n_head=16,  # Increased from 12
@@ -1187,10 +1291,11 @@ def main():
         no_cuda=False
     )
 
-    # Use standard data collator for language modeling
+    # Use data collator for language modeling with proper padding
     data_collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer,
         mlm=False,  # No masked language modeling
+        pad_to_multiple_of=8,  # Pad to multiples of 8 for efficiency
     )
 
     # Initialize callbacks based on architecture
