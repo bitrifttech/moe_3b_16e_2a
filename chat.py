@@ -10,6 +10,15 @@ from dense_model import GPT2Dense
 
 def find_latest_checkpoint(output_dir='checkpoints'):
     """Find the latest checkpoint in the output directory."""
+    # Look for any checkpoint directories in the current directory
+    if not os.path.exists(output_dir):
+        # Look for output directories with different naming patterns
+        potential_dirs = glob.glob('outputs_*')
+        if potential_dirs:
+            # Use the most recently modified output directory
+            output_dir = max(potential_dirs, key=os.path.getmtime)
+            print(f"Using output directory: {output_dir}")
+    
     checkpoints = sorted(
         glob.glob(os.path.join(output_dir, 'checkpoint-*')),
         key=lambda x: int(x.split('-')[-1]) if x.split('-')[-1].isdigit() else -1

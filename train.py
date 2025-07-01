@@ -865,8 +865,12 @@ def main():
                        help="Choose model architecture: 'moe' for MoE transformer, 'dense' for standard transformer")
     parser.add_argument("--model_size", type=str, choices=["medium", "large", "200m", "400m", "600m", "800m", "1.5b"], default="800m",
                        help="Dense model size (ignored for MoE architecture)")
+    parser.add_argument("--moe_size", type=str, choices=["500m", "1b", "2b"], default="500m",
+                       help="MoE model size (ignored for dense architecture)")
+    parser.add_argument("--num_experts", type=int, default=16,
+                       help="Number of experts in MoE layers (ignored for dense architecture)")
     parser.add_argument("--use_flash_attention", action="store_true", default=True,
-                       help="Use flash attention for memory efficiency (dense models only)")
+                       help="Use flash attention for memory efficiency (both MoE and dense models)")
     parser.add_argument("--no_flash_attention", action="store_true", 
                        help="Disable flash attention (use standard attention)")
     parser.add_argument("--gradient_checkpointing", action="store_true",
@@ -1010,38 +1014,38 @@ def main():
     # Model configuration and creation based on architecture choice
     if args.architecture == "moe":
         print(f"Creating MoE model architecture...")
-        # MoE model configuration - existing configuration
-        cfg = GPT2Config(
-            vocab_size=len(tokenizer),
-            n_positions=max(1024, args.max_length),  # Use longer context length
-            n_embd=1024,  # Increased model capacity
-            n_layer=8,  # Increased from 6
-            n_head=16,  # Increased from 12
-            n_inner=4096,  # Increased feed-forward dimension
-            activation_function="gelu_new",
-            resid_pdrop=0.1,
-            embd_pdrop=0.1,
-            attn_pdrop=0.1,
-            layer_norm_epsilon=1e-5,
-            initializer_range=0.02,
-            summary_type="cls_index",
-            summary_use_proj=True,
-            summary_activation=None,
-            summary_proj_to_labels=True,
-            summary_first_dropout=0.1,
-            use_cache=True,
-            bos_token_id=tokenizer.bos_token_id,
-            eos_token_id=tokenizer.eos_token_id,
-            pad_token_id=tokenizer.pad_token_id,
-            num_labels=1,
-            output_attentions=False,
-            output_hidden_states=False,
-            return_dict=True,
+        from moe_model import create_moe_config, GPT2WithMoE, get_moe_model_info
+        
+        # Create MoE configuration with flash attention
+        cfg = create_moe_config(
+            model_size=getattr(args, 'moe_size', '500m'),
+            use_flash_attention=not args.no_flash_attention
         )
-
-        from moe_model import GPT2WithMoE
-        model = GPT2WithMoE(cfg)
-        print(f"Created MoE model with ~500M active parameters")
+        
+        # Update tokenizer-specific settings
+        cfg.vocab_size = len(tokenizer)
+        cfg.bos_token_id = tokenizer.bos_token_id
+        cfg.eos_token_id = tokenizer.eos_token_id
+        cfg.pad_token_id = tokenizer.pad_token_id
+        
+        # Adjust context length based on max_length argument
+        cfg.n_positions = max(cfg.n_positions, args.max_length)
+        
+        # Create MoE model with specified number of experts
+        num_experts = getattr(args, 'num_experts', 16)  # Increased from 10 to 16
+        model = GPT2WithMoE(cfg, num_experts=num_experts)
+        
+        # Print model information
+        info = get_moe_model_info(cfg, num_experts)
+        print(f"Created MoE model:")
+        print(f"  Total parameters: {info['total_params_m']:.1f}M")
+        print(f"  Active parameters: {info['active_params_m']:.1f}M")
+        print(f"  Layers: {info['layers']} ({info['moe_layers']} MoE + {info['dense_layers']} dense)")
+        print(f"  Experts: {info['num_experts']} ({info['experts_per_token']} active per token)")
+        print(f"  Context length: {info['context_length']}")
+        print(f"  Active memory (FP32): {info['active_memory_fp32_gb']:.2f} GB")
+        print(f"  Flash attention (SDPA): {not args.no_flash_attention}")
+        print(f"  Expert utilization: {info['expert_utilization']}")
         
     elif args.architecture == "dense":
         print(f"Creating dense model architecture: {args.model_size}")
@@ -1082,23 +1086,41 @@ def main():
     
     # Save model configuration for reference
     import json
-    model_config = {
-        "architecture": args.architecture,
-        "model_size": args.model_size if args.architecture == "dense" else "moe_500m",
-        "parameters": f"{get_model_info(cfg)['total_params_m']:.1f}M" if args.architecture == "dense" else "~500M active",
-        "config": cfg.to_dict(),
-        "training_args": {
-            "max_length": args.max_length,
-            "learning_rate": args.learning_rate,
-            "batch_size": args.batch_size,
-            "epochs": args.epochs,
-            "gradient_accumulation_steps": args.gradient_accumulation_steps
+    if args.architecture == "dense":
+        from dense_model import get_model_info
+        info = get_model_info(cfg)
+        model_config = {
+            "architecture": args.architecture,
+            "model_size": args.model_size,
+            "parameters": f"{info['total_params_m']:.1f}M",
+            "config": cfg.to_dict(),
         }
+    else:  # MoE
+        from moe_model import get_moe_model_info
+        info = get_moe_model_info(cfg, num_experts)
+        model_config = {
+            "architecture": args.architecture,
+            "moe_size": args.moe_size,
+            "num_experts": num_experts,
+            "total_parameters": f"{info['total_params_m']:.1f}M",
+            "active_parameters": f"{info['active_params_m']:.1f}M",
+            "expert_utilization": info['expert_utilization'],
+            "config": cfg.to_dict(),
+        }
+    
+    # Add common training configuration
+    model_config["training_args"] = {
+        "max_length": args.max_length,
+        "learning_rate": args.learning_rate,
+        "batch_size": args.batch_size,
+        "epochs": args.epochs,
+        "gradient_accumulation_steps": args.gradient_accumulation_steps,
+        "flash_attention": not args.no_flash_attention
     }
     
     # Create output directory early to save config
     if args.architecture == "moe":
-        output_dir = f"{args.output_dir}_moe"
+        output_dir = f"{args.output_dir}_moe_{args.moe_size}_{args.num_experts}experts"
     else:
         output_dir = f"{args.output_dir}_dense_{args.model_size}"
     
@@ -1260,7 +1282,7 @@ def main():
     # Training arguments with enhanced settings (compatible with older Transformers)
     # Create output directory name that includes architecture info
     if args.architecture == "moe":
-        output_dir = f"{args.output_dir}_moe"
+        output_dir = f"{args.output_dir}_moe_{args.moe_size}_{args.num_experts}experts"
     else:
         output_dir = f"{args.output_dir}_dense_{args.model_size}"
     
