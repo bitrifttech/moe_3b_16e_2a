@@ -105,18 +105,28 @@ def human_count(n: int) -> str:
     return str(n)
 
 
-def load_model(checkpoint: str, device: torch.device):
-    """Load a checkpoint with support for MoE models, based on chat.py logic."""
+def load_model(checkpoint: str, device: torch.device, architecture: str = "moe"):
+    """Load a checkpoint with support for both MoE and dense models."""
     from pathlib import Path
     import torch
     from transformers import AutoTokenizer
+    import sys
+    import os
+    
+    # Add parent directory to path to import model modules
+    parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if parent_dir not in sys.path:
+        sys.path.insert(0, parent_dir)
+    
+    # Import both model types
     from moe_model import GPT2WithMoE
+    from dense_model import GPT2Dense
 
     checkpoint_path = Path(checkpoint)
     if not checkpoint_path.is_dir():
         raise FileNotFoundError(f"Checkpoint directory not found at {checkpoint_path}")
 
-    print(f"Loading model from {checkpoint_path}...")
+    print(f"Loading {architecture.upper()} model from {checkpoint_path}...")
 
     # Load tokenizer from base GPT-2 (not from checkpoint)
     print("Loading tokenizer...")
@@ -133,14 +143,22 @@ def load_model(checkpoint: str, device: torch.device):
     safetensors_path = checkpoint_path / "model.safetensors"
     pytorch_path = checkpoint_path / "pytorch_model.bin"
 
-    # Initialize model with config
+    # Initialize model with appropriate architecture
     print("Loading model configuration...")
-    model = GPT2WithMoE.from_pretrained(
-        str(checkpoint_path),
-        config=str(config_path),
-        local_files_only=True,
-        ignore_mismatched_sizes=True
-    )
+    if architecture.lower() == "dense":
+        model = GPT2Dense.from_pretrained(
+            str(checkpoint_path),
+            config=str(config_path),
+            local_files_only=True,
+            ignore_mismatched_sizes=True
+        )
+    else:  # moe
+        model = GPT2WithMoE.from_pretrained(
+            str(checkpoint_path),
+            config=str(config_path),
+            local_files_only=True,
+            ignore_mismatched_sizes=True
+        )
 
     # Load weights
     print("Loading model weights...")
@@ -158,7 +176,7 @@ def load_model(checkpoint: str, device: torch.device):
 
     model.to(device)
     model.eval()
-    print("Model loaded successfully!")
+    print(f"{architecture.upper()} model loaded successfully!")
 
     return model, tokenizer
 
@@ -371,6 +389,13 @@ def main():
         help="Device to run on (default: cuda if available else cpu)"
     )
     parser.add_argument(
+        "--architecture",
+        type=str,
+        choices=["moe", "dense"],
+        default="moe",
+        help="Model architecture type (moe or dense, default: moe)"
+    )
+    parser.add_argument(
         "--samples",
         type=int,
         default=100,
@@ -421,7 +446,7 @@ def main():
     # Load model and tokenizer
     print(f"Loading model from {args.checkpoint}...")
     try:
-        model, tokenizer = load_model(args.checkpoint, device)
+        model, tokenizer = load_model(args.checkpoint, device, architecture=args.architecture)
     except Exception as e:
         print(f"Error loading model: {str(e)}")
         return

@@ -889,6 +889,8 @@ def main():
     parser.add_argument("--max_samples", type=int, default=25000, help="Maximum number of samples per individual dataset")
     parser.add_argument("--max_length", type=int, default=1024, help="Maximum sequence length")
     parser.add_argument("--ignore_checkpoint", action="store_true", help="Ignore existing checkpoints and start training from step 1")
+    parser.add_argument("--pretrained_model", type=str, default=None,
+                    help="Path to pretrained base model for fine-tuning (e.g., moe_base_model_moe/)")
     
     # Training hyperparameters  
     parser.add_argument("--batch_size", type=int, default=8, help="Batch size per device during training.")
@@ -1040,7 +1042,11 @@ def main():
         )
 
         from moe_model import GPT2WithMoE
-        model = GPT2WithMoE(cfg)
+        if args.pretrained_model:
+            print(f"Loading pretrained base model from {args.pretrained_model}")
+            model = GPT2WithMoE.from_pretrained(args.pretrained_model, config=cfg)
+        else:
+            model = GPT2WithMoE(cfg)
         print(f"Created MoE model with ~500M active parameters")
         
     elif args.architecture == "dense":
@@ -1059,7 +1065,11 @@ def main():
         # Adjust context length based on max_length argument
         cfg.n_positions = max(cfg.n_positions, args.max_length)
         
-        model = GPT2Dense(cfg)
+        if args.pretrained_model:
+            print(f"Loading pretrained base model from {args.pretrained_model}")
+            model = GPT2Dense.from_pretrained(args.pretrained_model, config=cfg)
+        else:
+            model = GPT2Dense(cfg)
         
         # Enable gradient checkpointing if requested
         if args.gradient_checkpointing:
